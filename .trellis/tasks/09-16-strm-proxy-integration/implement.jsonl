@@ -1,0 +1,8 @@
+{"file": ".trellis/tasks/09-16-strm-proxy-play/design.md", "reason": "接入点契约: 决策流程、日志条目 L1/L2/L2'、错误回退表与不叠加 checkErr 的理由"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/prd.md", "reason": "需求全集 R1-R11 与跨子任务验收 AC0-AC8"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/research/strm-proxy-findings.md", "reason": "现状链路分析(redirect.go 决策分支)与缓存中间件缓冲风险的成因"}
+{"file": ".trellis/tasks/09-16-cache-stream-passthrough/prd.md", "reason": "确认字节流路由已移出缓存白名单, handler 侧无需任何缓存处理(AC0)"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "checkErr 语义与为何本任务不叠加它; 错误消息格式"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "日志级别映射、禁止打印 itemInfo(泄漏 ApiKey)"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "路由规则表与常量的组织方式, 确认无需新增路由"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "评审清单: 新配置项、新端点、日志与测试要求"}

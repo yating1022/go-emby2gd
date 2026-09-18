@@ -1,0 +1,9 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "新包的落点、包内文件命名惯例(type.go/log.go)、依赖方向与配置项落点"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "禁止模式(interface{}/第三方测试库/裸 http.Get)、具名常量、测试约定"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "错误包装(%w)、禁止复制内联哨兵模式、错误消息格式"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "级别函数映射、[直链代理] 前缀方案、禁止打印 api key"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "本项目无数据库, 内存态与全局单例的既有模式(本包自建 sync.Map 缓存)"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "复用 util/https、bytess、strs、trys 之前先检索, 避免重复实现"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "config → service 的数据流, 配置派生字段的边界"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/research/strm-proxy-findings.md", "reason": "URL 编码畸形的复现证据与可复用既有实现的清单"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/design.md", "reason": "父任务共享契约: 归一化、请求头策略、缓存、日志条目、错误回退"}

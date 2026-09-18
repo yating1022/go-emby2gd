@@ -1,0 +1,9 @@
+{"file": ".trellis/spec/backend/http-proxy.md", "reason": "出站代理契约: 请求头白名单/强制 Accept-Encoding: identity/流式固定缓冲/调用方 Context, Google API 调用同样适用"}
+{"file": ".trellis/spec/backend/response-cache.md", "reason": "字节流路由不参与响应缓存的契约, 避免新代码把 fetch 结果写进响应缓存"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "新包落点、包内文件命名惯例(type.go/log.go/api.go)、依赖方向与路由表组织方式"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "禁止模式、具名常量、测试约定与代码评审清单"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "错误包装(%w)、中文消息、不泄漏 err 细节; 回退语义"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "级别函数映射、[直链代理] 前缀、禁止打印凭据"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/design.md", "reason": "现有代理链路的共享契约(归一化/请求头/缓存/日志/并发), gdrive 必须与之衔接而非另起一套"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/research/strm-proxy-findings.md", "reason": "网关实测行为与 URL 编码坑, 理解为什么要换成 Drive API"}
+{"file": ".trellis/tasks/09-16-gdrive-api-direct/prd.md", "reason": "官方文档查证结论(无路径接口/团队盘必需参数/配额), 实现不得与之冲突"}

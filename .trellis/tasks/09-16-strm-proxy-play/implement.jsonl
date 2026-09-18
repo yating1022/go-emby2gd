@@ -1,0 +1,5 @@
+{"file": ".trellis/tasks/09-16-strm-proxy-play/research/strm-proxy-findings.md", "reason": "父任务级证据基线: 上游实测、URL 编码复现、缓存缓冲风险"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/design.md", "reason": "跨子任务共享契约, 派发子任务前的唯一技术依据"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/prd.md", "reason": "需求全集、任务地图与跨子任务验收标准"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "分层与依赖方向, 判断各子任务的落点是否合规"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "跨子任务的统一质量门与构建前置条件"}

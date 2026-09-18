@@ -1,0 +1,5 @@
+{"file": ".trellis/tasks/09-16-strm-proxy-play/prd.md", "reason": "集成评审依据: 跨子任务验收 AC1-AC7"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/design.md", "reason": "集成评审依据: 决策流程、日志契约、错误回退语义的一致性"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/implement.md", "reason": "集成验收步骤 V1-V6 与跨子任务检查清单"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/research/strm-proxy-findings.md", "reason": "对照实测证据核对最终行为(如 Range/206、无 302 的默认路径)"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "核对全链路日志的级别与无凭据泄漏"}

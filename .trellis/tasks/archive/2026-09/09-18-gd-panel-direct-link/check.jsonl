@@ -1,0 +1,9 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "评审清单: 禁止模式、具名常量、测试覆盖要求"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "回退语义必须保持: 任何环节失败且未写出响应时回退 ProxyOrigin"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "核对日志中不出现 Token / Authorization / 面板 headers"}
+{"file": ".trellis/spec/backend/http-proxy.md", "reason": "核对请求头白名单、Accept-Encoding: identity、不把上游异常正文带进日志"}
+{"file": ".trellis/spec/backend/response-cache.md", "reason": "确认字节流路由仍不在响应缓存白名单内, 新代码未引入整段缓冲"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "跨层核对: config -> gdrive -> streamproxy -> emby/redirect 的数据流与失败分支是否一致"}
+{"file": ".trellis/tasks/09-18-gd-panel-direct-link/prd.md", "reason": "逐条核对验收标准 A1-A15"}
+{"file": ".trellis/tasks/09-18-gd-panel-direct-link/design.md", "reason": "核对实现与设计决策一致(缓存 TTL、重试语义、删除清单)"}
+{"file": ".trellis/tasks/09-18-gd-panel-direct-link/implement.md", "reason": "核对 §7 全量验证与 §9 完成标准"}

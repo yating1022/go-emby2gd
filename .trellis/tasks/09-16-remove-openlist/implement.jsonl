@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "依赖方向与包布局: 判断哪些包是叶子可整体删除, 路由规则表与常量的成对改动方式"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "配置加载的反射机制与全局单例模式, 确认移除配置段不会引发 nil 指针 panic"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "禁止模式与评审清单; 构建前置条件(web/dist)"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "删除过程中不得留下空壳与死分支; 错误消息约定"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "移除后台循环(localtree 同步、playlist 维护)时确认无残留日志与 goroutine"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "改动常量/配置前先检索引用(Pre-Modification Rule), 避免漏改"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/prd.md", "reason": "父任务 R5(回归保护面)与 R8(移除 OpenList), 以及为什么排在最后"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/research/strm-proxy-findings.md", "reason": "理解 strm 分支与 OpenList 分支的先后关系, 确认删除不会破坏代理功能"}

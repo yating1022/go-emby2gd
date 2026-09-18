@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "核对删除后各层依赖方向是否仍然成立, 无悬空引用"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "逐条核对评审清单; 确认无未使用 import、无空壳符号、测试仍可运行"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "核对配置结构变更后启动路径仍然安全"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/prd.md", "reason": "按 R5 的回归保护清单逐项核对未误删"}
+{"file": ".trellis/tasks/09-16-strm-proxy-integration/prd.md", "reason": "确认 strm 代理分支在删除后仍完整保留(AC8)"}
+{"file": ".trellis/tasks/09-16-remove-openlist/prd.md", "reason": "对照删除范围与残留检查命令核对完整性"}

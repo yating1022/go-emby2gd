@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "逐条核对禁止/必需模式与代码评审清单"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "核对错误传播、%w 使用、不泄漏 err 细节到客户端"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "核对日志级别、前缀一致性、无凭据泄漏"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "核对未新增反向依赖(streamproxy 不得依赖 web/gin)"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/design.md", "reason": "按共享契约逐条核对实现: 请求头白名单、缓存写入条件、日志条目、错误回退边界"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/prd.md", "reason": "核对父任务级需求 R1-R11 是否被本子任务完整覆盖或明确划出范围"}

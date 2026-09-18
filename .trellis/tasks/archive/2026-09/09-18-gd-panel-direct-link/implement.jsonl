@@ -1,0 +1,9 @@
+{"file": ".trellis/spec/backend/http-proxy.md", "reason": "出站 HTTP 契约: 请求头白名单、强制 Accept-Encoding: identity、header 规范化、流式传输规则; 面板调用与 Google 拉流都必须遵守"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "包落点与包内文件命名惯例(gdrive.go/log.go/type.go)、依赖方向、路由表组织方式"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "禁止模式、具名常量、测试约定与代码评审清单"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "错误包装(%w)、中文消息、不泄漏 err 细节; 回退语义与 checkErr 出口"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "级别函数映射、[直链代理] 前缀、禁止打印凭据; 面板返回的账号级 Token 绝不能进日志"}
+{"file": ".trellis/tasks/09-18-gd-panel-direct-link/prd.md", "reason": "需求与验收标准 A1-A15, 实现不得与之冲突"}
+{"file": ".trellis/tasks/09-18-gd-panel-direct-link/design.md", "reason": "技术设计: 模块边界、配置契约、缓存 TTL 推导、跨主机跳转丢头问题与解法、清理清单"}
+{"file": "GD_DIRECT_LINK_API.md", "reason": "面板接口契约原文: 请求/响应字段、错误码表、§6.2 跨主机跳转丢 Authorization 的实测结论"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/design.md", "reason": "现有 strm 代理链路的共享契约(归一化/请求头/缓存/日志/并发/回退), 新数据源必须与之衔接而非另起一套"}

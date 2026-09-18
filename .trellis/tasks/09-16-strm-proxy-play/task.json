@@ -1,0 +1,32 @@
+{
+  "id": "strm-proxy-play",
+  "name": "strm-proxy-play",
+  "title": "strm 直链代理播放(客户端流量走本项目)",
+  "description": "strm 内容为配置域名开头的 http 地址时, 由本项目请求上游并流式代理给客户端, 不再 302; 全链路日志可排查。含 OpenList 功能移除子任务。",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P0",
+  "creator": "fruits",
+  "assignee": "fruits",
+  "createdAt": "2026-09-16",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "09-16-strm-proxy-core",
+    "09-16-strm-proxy-integration",
+    "09-16-remove-openlist",
+    "09-16-cache-stream-passthrough",
+    "09-16-fix-cache-header-leak"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

@@ -1,0 +1,7 @@
+{"file": ".trellis/tasks/09-16-strm-proxy-play/design.md", "reason": "逐条核对决策流程、日志条目与回退语义是否与契约一致"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/prd.md", "reason": "核对父任务级 AC 是否可被本次改动满足"}
+{"file": ".trellis/tasks/09-16-cache-stream-passthrough/prd.md", "reason": "核对字节流路由已移出缓存白名单, 确认 handler 中不应出现缓存旁路调用"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "核对错误传播与客户端可见的错误格式"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "核对日志级别、前缀一致性、无凭据泄漏、开关关闭时无日志噪音"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "逐条核对代码评审清单"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/research/strm-proxy-findings.md", "reason": "对照证据核对遗留风险是否已被处理(HEAD 短路、缓冲区旁路)"}

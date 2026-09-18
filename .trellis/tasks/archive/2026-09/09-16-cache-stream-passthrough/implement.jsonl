@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "确认 internal/web/cache 的层级归属、中间件挂载顺序与依赖方向"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "禁止模式(interface{}/第三方测试库)、具名常量、测试约定与评审清单"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "日志级别语义、内部响应头不得泄漏给客户端"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "确认改动不改变错误响应的缓存与传播语义"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "改动 web 层中间件对 service 层流式代理行为的影响面"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/research/strm-proxy-findings.md", "reason": "缓冲问题的代码证据、影响面矩阵与 WriteString/ReaderFrom 核实结论"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/design.md", "reason": "父任务共享契约, 确认本改动与代理链路的分工边界"}

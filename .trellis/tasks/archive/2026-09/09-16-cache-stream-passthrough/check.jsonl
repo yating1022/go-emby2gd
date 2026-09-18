@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "逐条对照禁止/必需模式与代码评审清单"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "确认未新增反向依赖, 改动留在 internal/web/cache 内"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "检查内部响应头(Expired/Space/Space-Key)在所有返回路径上都已清理"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "检查错误响应仍不进缓存、不改变客户端可见的错误格式"}
+{"file": ".trellis/tasks/09-16-strm-proxy-play/research/strm-proxy-findings.md", "reason": "按证据核对 WriteString 不覆写、兜底上限取值等关键决策"}
