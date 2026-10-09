@@ -28,13 +28,19 @@ strm content                      一次替换                 面板 /api/dl
 
 The project server proxies the bytes. **Neither the Emby server nor the panel forwards them.**
 
-Public surface is exactly three functions — keep it that way:
+Public surface is four functions — keep it that way:
 
 ```go
 func IsEnabled() bool
 func MatchMountPath(strmContent string) (gdPath string, ok bool)
 func FetchStream(ctx context.Context, gdPath, clientRange string) (*http.Response, error)
+func ResolveTarget(ctx context.Context, gdPath string) (url string, headers map[string]string, expiresAt string, err error)
 ```
+
+`ResolveTarget` (the 4th, added 2026-10-09 by the agent proxy network) returns the same cached target
+**without fetching bytes** — it feeds the agent-facing `/api/agent/download-link` endpoint. The cache
+internals below stay exactly as described; callers must treat the returned `headers` map as read-only
+(it is the shared account-level credential).
 
 ## 3. Contracts
 
@@ -240,6 +246,9 @@ return fmt.Errorf("取直链失败 [%s] %s", envelope.Error.Code, redactConfigSe
 - `internal/service/emby/redirect.go` — `MatchMountPath` is checked **outside and before** the
   `urls.IsHttpRemote` branch: a mount path is a local filesystem path, not an HTTP URL, so it can
   never match inside that branch. Do not move it.
+- `internal/service/emby/redirect.go` — the agent-network dispatch (agent-network.md §3.7) sits
+  **inside the same `MatchMountPath` block**, before the `ProxyGDrive` call. Anything that changes how
+  the block decides must keep the "no fallback after the first byte" contract intact.
 - `internal/service/streamproxy/` — owns byte relay, response-header write-back, the concurrency
   slot and fallback semantics. `gdrive` must not reimplement any of it.
 - The concurrency slot is acquired **before** the link is resolved, so a request that queued a

@@ -32,15 +32,24 @@ type fakeEmbyOrigin struct {
 	originHits atomic.Int64
 	// lastOriginURI 最近一次回源转发的 RequestURI
 	lastOriginURI atomic.Value
+	// playbackProbes 每次收到 PlaybackInfo 探测时发一个信号
+	//
+	// 供 waitForPlaybackProbe 使用: 播放入口是异步发探测的, 不等它落地,
+	// 用例结束还原 config.C 后那个 goroutine 会读到空配置而崩掉整个测试进程。
+	playbackProbes chan struct{}
 }
 
 // newFakeEmbyOrigin 启动假 Emby 源服务器
 func newFakeEmbyOrigin(t *testing.T, mediaPath string) *fakeEmbyOrigin {
 	t.Helper()
 
-	f := &fakeEmbyOrigin{mediaPath: mediaPath}
+	f := &fakeEmbyOrigin{mediaPath: mediaPath, playbackProbes: make(chan struct{}, 16)}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/PlaybackInfo") {
+			select {
+			case f.playbackProbes <- struct{}{}:
+			default:
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"MediaSources": []map[string]any{{"Path": f.mediaPath, "Id": "ms-1"}},
@@ -56,6 +65,34 @@ func newFakeEmbyOrigin(t *testing.T, mediaPath string) *fakeEmbyOrigin {
 	t.Cleanup(f.server.Close)
 
 	return f
+}
+
+// playbackProbeQuiet 判定"探测已全部落地"的静默窗口
+const playbackProbeQuiet = 100 * time.Millisecond
+
+// waitForPlaybackProbes 等待所有异步 PlaybackInfo 探测落地
+//
+// Redirect2OpenlistLink 在直链分支里 go sendOpenStreamPlaybackInfoReqToOrigin(...),
+// 该 goroutine 会读取全局 config.C; 用例结束时会还原 config.C, 因此必须等它跑完,
+// 否则它会在用例之外读到空配置而崩溃, 把整个测试进程带走。
+//
+// 一次请求会先后产生两次 PlaybackInfo 命中(解析媒体信息的同步请求 + 异步通知),
+// 数量不是契约, 所以这里按"静默窗口内不再有新的探测"判定结束, 而不是数个数。
+func (f *fakeEmbyOrigin) waitForPlaybackProbes(t *testing.T) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Error("等待异步 PlaybackInfo 探测超时")
+			return
+		}
+		select {
+		case <-f.playbackProbes:
+		case <-time.After(playbackProbeQuiet):
+			return
+		}
+	}
 }
 
 // fakePanel 假 GD 管理面板
@@ -208,7 +245,8 @@ func captureRedirectLogs(t *testing.T) *redirectLogCollector {
 // 这是本功能存在的意义: 客户端拿到的必须是媒体字节, 而不是一个 302;
 // 同时 Emby 源服务器不应收到任何回源请求。
 func TestRedirect2OpenlistLink_GDriveMountPathProxied(t *testing.T) {
-	origin := newFakeEmbyOrigin(t, "/home/googleDrive/影视库/最新电影/A/x.mkv")
+	gdPath := uniqueGDPath("/影视库/最新电影/A/x.mkv")
+	origin := newFakeEmbyOrigin(t, "/home/googleDrive"+gdPath)
 	drive := newDirectLinkServer(t, "panel-proxied-bytes")
 	panel := newFakePanel(t, drive.URL)
 	withEmbyTestConfig(t, origin.server.URL, nil, panel.server.URL)
@@ -240,11 +278,13 @@ func TestRedirect2OpenlistLink_GDriveMountPathProxied(t *testing.T) {
 	if got := origin.originHits.Load(); got != 0 {
 		t.Errorf("代理成功时不应回源, 但假 Emby 源收到了 %d 次回源请求", got)
 	}
+	origin.waitForPlaybackProbes(t)
 }
 
 // TestRedirect2OpenlistLink_GDriveFailureFallsBackToOrigin 面板失败时回源
 func TestRedirect2OpenlistLink_GDriveFailureFallsBackToOrigin(t *testing.T) {
-	origin := newFakeEmbyOrigin(t, "/home/googleDrive/影视库/最新电影/B/x.mkv")
+	gdPath := uniqueGDPath("/影视库/最新电影/B/x.mkv")
+	origin := newFakeEmbyOrigin(t, "/home/googleDrive"+gdPath)
 	panel := newFailingPanel(t, http.StatusNotFound, "PATH_NOT_IN_CACHE", "路径尚未缓存, 请先缓存它")
 	withEmbyTestConfig(t, origin.server.URL, nil, panel.server.URL)
 
@@ -273,13 +313,15 @@ func TestRedirect2OpenlistLink_GDriveFailureFallsBackToOrigin(t *testing.T) {
 	if got := recorder.Body.String(); got != "origin-bytes" {
 		t.Errorf("客户端收到的响应体 = %q, want origin-bytes", got)
 	}
+	origin.waitForPlaybackProbes(t)
 }
 
 // TestRedirect2OpenlistLink_GDriveTokenNotForwardedToClient
 //
 // 面板给的 Authorization 是账号级 Google 凭据, 绝不能回写给客户端。
 func TestRedirect2OpenlistLink_GDriveTokenNotForwardedToClient(t *testing.T) {
-	origin := newFakeEmbyOrigin(t, "/home/googleDrive/影视库/最新电影/C/x.mkv")
+	gdPath := uniqueGDPath("/影视库/最新电影/C/x.mkv")
+	origin := newFakeEmbyOrigin(t, "/home/googleDrive"+gdPath)
 	drive := newDirectLinkServer(t, "panel-proxied-bytes")
 	panel := newFakePanel(t, drive.URL)
 	withEmbyTestConfig(t, origin.server.URL, nil, panel.server.URL)
@@ -294,6 +336,7 @@ func TestRedirect2OpenlistLink_GDriveTokenNotForwardedToClient(t *testing.T) {
 	if strings.Contains(logger.String(), "panel-issued-token") {
 		t.Errorf("账号级凭据不得进日志, 实际: %s", logger.String())
 	}
+	origin.waitForPlaybackProbes(t)
 }
 
 func TestRedirect2OpenlistLink_NonMountPathUnchanged(t *testing.T) {

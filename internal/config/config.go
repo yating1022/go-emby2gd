@@ -29,6 +29,8 @@ type Config struct {
 	Ge2o *Ge2o `yaml:"ge2o"`
 	// GDrive GD 管理面板直链配置
 	GDrive *GDrive `yaml:"gdrive"`
+	// AgentNetwork agent 代理网络(master 侧)配置
+	AgentNetwork *AgentNetwork `yaml:"agent-network"`
 }
 
 // C 全局唯一配置对象

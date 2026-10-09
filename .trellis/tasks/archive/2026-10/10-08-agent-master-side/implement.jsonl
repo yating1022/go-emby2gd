@@ -1,0 +1,8 @@
+{"file": ".trellis/tasks/10-08-agent-proxy-network/design.md", "reason": "协议落地全文（§2 端点/签名/余量/状态文件/播放入口；§6 陷阱）——本任务技术依据"}
+{"file": ".trellis/tasks/10-08-agent-master-side/prd.md", "reason": "本任务需求 A-R1–A-R10 与验收标准"}
+{"file": ".trellis/tasks/10-08-agent-master-side/implement.md", "reason": "A1–A10 顺序清单与验证命令"}
+{"file": ".trellis/spec/backend/gdrive-panel.md", "reason": "直链链路既有契约；ResolveTarget 导出与复用约束（含「无 302」事实）"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "内存状态模式（RWMutex/sync.Map）与 agents.json 写盘例外"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "新包落点、路由注册表、依赖方向惯例"}
+{"file": ".trellis/spec/backend/http-proxy.md", "reason": "出站 HTTP 契约（面板调用沿用 https util / Accept-Encoding: identity）"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "日志前缀/级别惯例；凭据/签名不落日志"}

@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门与测试/构建前置条件"}
+{"file": ".trellis/tasks/10-08-agent-proxy-network/design.md", "reason": "集成评审依据：协议、开关、错误语义一致性（§2/§4/§6）"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "错误语义（哨兵错误/回退分级/中文错误文案）与既有惯例一致"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "核对无凭据泄漏（secret/sign_key/Google 凭据/s 参数/完整签名 URL）"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "跨端一致性核对（字段名/签名格式/错误码与 agent 侧对齐）"}

@@ -1,0 +1,4 @@
+{"file": ".trellis/tasks/10-08-agent-web-page/research/frontend-conventions.md", "reason": "前端栈/路由/导航/secret/fetch 惯例与构建命令——写页面必须遵守"}
+{"file": ".trellis/tasks/10-08-agent-web-page/prd.md", "reason": "接口契约快照（子任务 A 已落地）与验收标准"}
+{"file": ".trellis/tasks/10-08-agent-web-page/design.md", "reason": "落点清单与页面结构约定"}
+{"file": ".trellis/tasks/10-08-agent-proxy-network/design.md", "reason": "§2.9 Web 端契约与 §2.1 错误语义（跨端一致性基准）"}

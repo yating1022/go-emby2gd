@@ -18,7 +18,10 @@ const MatchRouteKey = "matchRoute"
 
 // globalDftHandler 全局默认兜底的请求处理器
 func globalDftHandler(c *gin.Context) {
-	if c.Request.Method == http.MethodHead {
+	// HEAD 请求默认不参与路由匹配(直接返回空 200); 安装脚本是例外:
+	// 它要求 HEAD 与 GET 同头(Content-Type / Content-Length / Cache-Control),
+	// 因此必须放行到路由表(见 internal/service/agentnet 的 InstallScript)
+	if c.Request.Method == http.MethodHead && c.Request.URL.Path != constant.Route_InstallScript {
 		c.String(http.StatusOK, "")
 		return
 	}

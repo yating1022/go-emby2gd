@@ -43,6 +43,14 @@ const (
 
 	Reg_OpenlistLocalTreeUpdatePrefix = `^(/[^/\\]+)+$`
 
+	// agent 代理网络: 节点侧调用的三个接口(协议见 internal/service/agentnet)
+	Reg_AgentEnroll       = `^/api/agent/enroll($|\?)`
+	Reg_AgentHeartbeat    = `^/api/agent/heartbeat($|\?)`
+	Reg_AgentDownloadLink = `^/api/agent/download-link($|\?)`
+
+	// agent 节点安装脚本(脚本本身不含密钥, 无需鉴权)
+	Reg_InstallScript = `^/install\.sh($|\?)`
+
 	Reg_All = `.*`
 )
 
@@ -54,6 +62,16 @@ const (
 	Route_Web                     = Route_SelfBase + "/web"
 	Route_ValidateApiSecret       = Route_SelfBase + "/secret/validate"
 	Route_SyncServerLog           = Route_SelfBase + "/ws/log/sync"
+	Route_InstallScript           = "/install.sh"
+
+	// agent 代理网络管理接口(管理员, 沿用 /ge2o 惯例)
+	//
+	// 注意规则表的匹配顺序: /agents/update 与 /agents/delete 必须排在 /agents 之前
+	// (匹配是未锚定的子串查找, 否则会被前缀规则截胡)。
+	Route_AgentNetworkAgents         = Route_SelfBase + "/agent-network/agents"
+	Route_AgentNetworkAgentsUpdate   = Route_SelfBase + "/agent-network/agents/update"
+	Route_AgentNetworkAgentsDelete   = Route_SelfBase + "/agent-network/agents/delete"
+	Route_AgentNetworkInstallCommand = Route_SelfBase + "/agent-network/install-command"
 )
 
 const (

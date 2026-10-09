@@ -56,31 +56,36 @@ var refreshGroup singleflight.Group
 // getToken 读取当前可用的令牌
 //
 // 过期条目在读时直接判为不可用(惰性清理), 不引入后台清理协程。
-func getToken() (headers map[string]string, generation uint64, ok bool) {
+// expiresAtRaw 是面板给出的原始 RFC3339 串(原样透传给 agent, 见 ResolveTarget)。
+func getToken() (headers map[string]string, expiresAtRaw string, generation uint64, ok bool) {
 	tokenSlot.mu.RLock()
 	defer tokenSlot.mu.RUnlock()
 
 	entry := tokenSlot.entry
 	if entry.headers == nil || !time.Now().Before(entry.deadline) {
-		return nil, tokenSlot.generation, false
+		return nil, "", tokenSlot.generation, false
 	}
-	return entry.headers, tokenSlot.generation, true
+	return entry.headers, entry.expiresAtRaw, tokenSlot.generation, true
 }
 
 // putToken 写入令牌槽并推进代次
+//
+// expiresAtRaw 是面板响应里的原始串, 只用于向下游(agent)原样透传;
+// 本包不做任何加工, 也不据它做判断(判断一律用解析后的 expiresAt)。
 //
 // 即使 expires_at 不可用也照样写入: 本次请求已经拿到凭据, 用它完成即可。
 // "能不能复用"由 deadline 决定 —— 算不出有效期的写入 deadline 即当下,
 // 读侧立刻判为过期, 效果等价于没缓存; 但代次照常推进,
 // 于是失效重试里"是否已被别的请求刷新过"的判断依然准确。
-func putToken(headers map[string]string, expiresAt, now time.Time) uint64 {
+func putToken(headers map[string]string, expiresAtRaw string, expiresAt, now time.Time) uint64 {
 	tokenSlot.mu.Lock()
 	defer tokenSlot.mu.Unlock()
 
 	tokenSlot.generation++
 	tokenSlot.entry = tokenEntry{
-		headers:  headers,
-		deadline: tokenDeadline(expiresAt, now),
+		headers:      headers,
+		expiresAtRaw: expiresAtRaw,
+		deadline:     tokenDeadline(expiresAt, now),
 	}
 	return tokenSlot.generation
 }
@@ -144,7 +149,7 @@ func putCachedURL(gdPath, directURL string, generation uint64) {
 // 反过来, 两个都判也不会让并发的同路径请求各打一次面板: 首个刷新会同时推进
 // 令牌代次与这条路径的直链代次, 其余请求两个判据都能通过, 直接复用同一结果。
 func cachedTarget(gdPath string, minGeneration uint64) (*target, bool) {
-	headers, generation, ok := getToken()
+	headers, expiresAtRaw, generation, ok := getToken()
 	if !ok || generation <= minGeneration {
 		return nil, false
 	}
@@ -154,7 +159,12 @@ func cachedTarget(gdPath string, minGeneration uint64) (*target, bool) {
 		return nil, false
 	}
 
-	return &target{directURL: directURL, headers: headers, generation: generation}, true
+	return &target{
+		directURL:    directURL,
+		headers:      headers,
+		expiresAtRaw: expiresAtRaw,
+		generation:   generation,
+	}, true
 }
 
 // ensureTarget 取回一个可用的取流目标
@@ -185,14 +195,15 @@ func ensureTarget(ctx context.Context, gdPath string, minGeneration uint64) (*ta
 		}
 
 		now := time.Now()
-		generation := putToken(link.Headers, parseExpiresAt(link.ExpiresAt), now)
+		generation := putToken(link.Headers, link.ExpiresAt, parseExpiresAt(link.ExpiresAt), now)
 		putCachedURL(gdPath, link.URL, generation)
 
 		logInfof("已换取直链: %s, expires_at=%s", gdPath, link.ExpiresAt)
 		return &target{
-			directURL:  link.URL,
-			headers:    link.Headers,
-			generation: generation,
+			directURL:    link.URL,
+			headers:      link.Headers,
+			expiresAtRaw: link.ExpiresAt,
+			generation:   generation,
 		}, nil
 	})
 	if err != nil {

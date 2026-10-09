@@ -3,6 +3,7 @@ package web
 import (
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/constant"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service"
+	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/agentnet"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/emby"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/m3u8"
 	openlist_localtree "github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/openlist/localtree"
@@ -87,6 +88,23 @@ func initRulePatterns() {
 
 		// 同步服务端日志
 		{constant.Route_SyncServerLog, service.SyncServerLog},
+
+		// agent 代理网络: 节点注册 / 心跳 / 直链下发
+		{constant.Reg_AgentEnroll, agentnet.Enroll},
+		{constant.Reg_AgentHeartbeat, agentnet.Heartbeat},
+		{constant.Reg_AgentDownloadLink, agentnet.DownloadLink},
+
+		// agent 节点安装脚本(不含密钥, 无需鉴权; HEAD 与 GET 同头)
+		{constant.Reg_InstallScript, agentnet.InstallScript},
+
+		// agent 网络管理接口
+		//
+		// 顺序要求: /agents/update 与 /agents/delete 必须排在 /agents 之前
+		// (规则表是未锚定的子串匹配, 前缀规则会截胡更长的路径)
+		{constant.Route_AgentNetworkAgentsUpdate, agentnet.AdminUpdateAgent},
+		{constant.Route_AgentNetworkAgentsDelete, agentnet.AdminDeleteAgent},
+		{constant.Route_AgentNetworkInstallCommand, agentnet.AdminInstallCommand},
+		{constant.Route_AgentNetworkAgents, agentnet.AdminListAgents},
 
 		// 根路径重定向到首页
 		{constant.Reg_Root, emby.ProxyRoot},

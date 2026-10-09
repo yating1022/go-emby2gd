@@ -249,7 +249,7 @@ func (d *fakeDrive) receivedRanges() []string {
 // 用于模拟播放跨过令牌有效期边界: 直接写入一条 expires_at 在过去的条目,
 // deadline 会落到当下, 读侧立即判为不可用。
 func forceTokenExpired() {
-	putToken(map[string]string{"Authorization": "Bearer stale-token"}, time.Now().Add(-time.Hour), time.Now())
+	putToken(map[string]string{"Authorization": "Bearer stale-token"}, "", time.Now().Add(-time.Hour), time.Now())
 }
 
 // buildEndpoint 拼出本项目会请求的面板地址, 供用例做 URL 编码断言

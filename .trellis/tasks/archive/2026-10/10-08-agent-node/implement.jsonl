@@ -1,0 +1,5 @@
+{"file": ".trellis/tasks/10-08-agent-proxy-network/design.md", "reason": "§2.3 余量链（25<30<60）是唯一行为修正的依据；§2.8 安装与发布契约"}
+{"file": ".trellis/tasks/10-08-agent-node/prd.md", "reason": "本任务需求、范围约束（协议面零改动）与验收标准"}
+{"file": ".trellis/tasks/10-08-agent-node/design.md", "reason": "落点说明与余量修正的病灶解释"}
+{"file": ".trellis/tasks/10-08-agent-node/implement.md", "reason": "C1–C7 顺序清单与验证命令"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门（gofmt/vet/test -race）与构建前置条件"}

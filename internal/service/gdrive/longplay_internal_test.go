@@ -69,8 +69,7 @@ func TestFetchStream_RetriesOnceAfter401(t *testing.T) {
 	withTestConfig(t, panel.url())
 
 	// 预置一份"缓存以为有效、Google 却已拒绝"的凭据与直链
-	generation := putToken(map[string]string{"Authorization": "Bearer stale-token"},
-		time.Now().Add(time.Hour), time.Now())
+	generation := putToken(map[string]string{"Authorization": "Bearer stale-token"}, "", time.Now().Add(time.Hour), time.Now())
 	putCachedURL(testPath, drive.url(), generation)
 
 	resp, err := FetchStream(context.Background(), testPath, "")
@@ -100,8 +99,7 @@ func TestFetchStream_RetriesAtMostOnce(t *testing.T) {
 	})
 	withTestConfig(t, panel.url())
 
-	generation := putToken(map[string]string{"Authorization": "Bearer stale-token"},
-		time.Now().Add(time.Hour), time.Now())
+	generation := putToken(map[string]string{"Authorization": "Bearer stale-token"}, "", time.Now().Add(time.Hour), time.Now())
 	putCachedURL(testPath, drive.url(), generation)
 
 	_, err := FetchStream(context.Background(), testPath, "")
@@ -136,8 +134,7 @@ func TestFetchStream_Concurrent401SharesSingleRefresh(t *testing.T) {
 	})
 	withTestConfig(t, panel.url())
 
-	generation := putToken(map[string]string{"Authorization": "Bearer stale-token"},
-		time.Now().Add(time.Hour), time.Now())
+	generation := putToken(map[string]string{"Authorization": "Bearer stale-token"}, "", time.Now().Add(time.Hour), time.Now())
 	putCachedURL(testPath, drive.url(), generation)
 
 	var (

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
 )
@@ -49,5 +50,21 @@ func TestConfigExample_Loadable(t *testing.T) {
 	}
 	if got := config.C.GDrive.MountPrefix; got != "/home/googleDrive" {
 		t.Errorf("配置示例文件的 gdrive.mount-prefix = %q, want /home/googleDrive", got)
+	}
+
+	if config.C.AgentNetwork == nil {
+		t.Fatal("配置示例文件应包含 agent-network 段")
+	}
+	if config.C.AgentNetwork.IsEnabled() {
+		t.Error("配置示例文件的 agent-network.enable 应默认为 false")
+	}
+	if got := config.C.AgentNetwork.OfflineSeconds; got != 45 {
+		t.Errorf("配置示例文件的 agent-network.offline-seconds = %d, want 45", got)
+	}
+	if got := config.C.AgentNetwork.ClientURLTTL(); got != 24*time.Hour {
+		t.Errorf("配置示例文件的 agent-network.url-ttl = %v, want 24h", got)
+	}
+	if !config.C.AgentNetwork.FallbackEnabled() {
+		t.Error("配置示例文件的 agent-network.fallback-to-local 应默认为 true")
 	}
 }

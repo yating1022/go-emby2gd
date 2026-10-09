@@ -59,6 +59,11 @@ type panelError struct {
 type tokenEntry struct {
 	// headers 请求下载地址时要带上的请求头
 	headers map[string]string
+	// expiresAtRaw 面板给出的原始 RFC3339 过期串
+	//
+	// 只用于原样透传(ResolveTarget -> agent 的 download-link 响应):
+	// agent 侧按它排直链刷新, 原样传才能保证两侧算的是同一个时刻。
+	expiresAtRaw string
 	// deadline 本条目视为过期的时刻
 	//
 	// 已经扣掉 linkCacheSafetyMargin 并封顶 maxLinkCacheTTL,
@@ -86,6 +91,10 @@ type target struct {
 	//
 	// 与令牌槽里的是同一份 map, 只读, 任何调用方都不得修改。
 	headers map[string]string
+	// expiresAtRaw 面板给出的原始 RFC3339 过期串(可空)
+	//
+	// 只透传给 agent, 本包不据它做任何判断。
+	expiresAtRaw string
 	// generation 这份凭据对应的令牌代次
 	//
 	// 失效重试用它判断"是否已经有别的请求刷新过": 代次比自己拿到的更新时,

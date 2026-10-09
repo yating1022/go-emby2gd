@@ -6,10 +6,17 @@
 
 ## Overview
 
-There is no database, ORM, or embedded KV storage (no sql/bbolt/lumberjack anywhere). All state is **in-memory**; the only things written to disk are *derived artifacts* that can be fully rebuilt from the remote OpenList on restart:
+There is no database, ORM, or embedded KV storage (no sql/bbolt/lumberjack anywhere). Almost all state is **in-memory**; the things written to disk are *derived artifacts* that can be fully rebuilt from the remote OpenList on restart:
 
 - `openlist-local-tree/` generated media placeholder files (strm / fake mp4 / fake mp3 / NFO — `localtree/task.go:109-160`)
 - the auto-downloaded ffmpeg binary (`lib/ffmpeg/auto_download.go:116`)
+
+**One sanctioned state-file exception (2026-10-09):** `<BasePath>/agent-network/agents.json` — the
+agent-network registry (id / machine_id / secret / sign_key / enabled / …). Enrollment secrets are
+**not rebuildable** (regenerating them strands every registered agent), so this state must survive
+restart: 0600, same-dir temp+rename atomic write, loaded at startup, corrupt file = fail-fast.
+Volatile fields (`last_seen` / `active_streams`) deliberately stay in memory. Any *further* state
+file still requires the same "discuss first" as before — see agent-network.md.
 
 `config.yml` (gitignored) is read **once at startup** — there is no hot reload, no fsnotify, no file watching. After `main.go:30` completes, `config.C` is treated as read-only without locks.
 
@@ -91,7 +98,7 @@ For new background-maintained state, copy this shape (cache/holder.go is the cle
 ## Common Mistakes
 
 1. **Assuming config can change at runtime** — it can't. Don't write to `config.C`; there is no reload mechanism.
-2. **Adding disk persistence for state** — state is rebuildable by design; if you think you need a DB, reconsider (or discuss first — it would be an architectural change).
+2. **Adding disk persistence for state** — state is rebuildable by design; if you think you need a DB, reconsider (or discuss first — it would be an architectural change). The single sanctioned exception today is `agent-network/agents.json` (credentials are not rebuildable — agent-network.md); anything else still needs that discussion.
 3. **Writing to shared maps from multiple goroutines** — route writes through the maintainer-goroutine pattern or use `sync.Map`; don't add ad-hoc mutexes around plain maps.
 4. **Forgetting `config.C == nil` guard** in code paths that might run before `ReadFromFile` (the guard exists at `config.go:83-85`).
 5. **Unbounded caches** — every cache in this project has explicit capacity/eviction (`MaxCacheNum`, `MaxPlaylistNum`, pre-buffered channel). New caches must too.

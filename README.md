@@ -64,6 +64,7 @@
 ### 本项目的核心路径
 
 - **GD 管理面板直链**: strm 内容命中 `gdrive.mount-prefix` 时, 去掉前缀得到团队盘内路径, 交给面板换取直链与请求头, 由本机带凭据拉流。面板返回的 `Authorization` 是**账号级**凭据, 只在本机与 Google 之间使用 —— 不回写客户端、不进日志、不落盘
+- **agent 代理网络**(可选, 默认关闭): 启用后, GD 挂载路径的播放优先 302 到 agent 节点**直连拉流** —— 字节不经过本机, 也不经过 Emby; Google 凭据只下发给持密钥的节点, 客户端永远拿不到。无可用节点时回退本机代理(`fallback-to-local` 可关)
 - **strm 直链代理**: 命中 `emby.strm.proxy.domains` 的 strm 地址由本机代理。支持手动跟随重定向(带跳数上限)、直链缓存、失效重试
 - **令牌与直链缓存**: 账号级令牌全局一份, 直链按路径缓存。缓存余量严格小于面板的提前刷新窗口, 播放跨过令牌有效期时透明换新, 不中断
 - **回退**: 以上任一环节失败且尚未写出响应时, 回退到回源(Emby 直读), 播放可用性不受新功能影响
@@ -77,7 +78,7 @@
 - OpenList 资源获取、本地目录树、转码 m3u8、emby→网盘路径映射、视频预览、音乐信息
 - websocket 代理、cors 调整、剧集排序
 
-> 本项目的实际部署只用到了 GD 面板直链、strm 直链代理与响应缓存;
+> 本项目的实际部署只用到了 GD 面板直链、strm 直链代理、agent 代理网络(可选)与响应缓存;
 > 其余能力保留可用, 但需要在 `config.yml` 里配置对应段落才会生效。
 
 ## 部署
@@ -187,6 +188,33 @@ emby:
       link-cache-expired: 10m
 ```
 
+### `agent-network` —— agent 代理网络（可选）
+
+```yaml
+agent-network:
+  enable: false            # 总开关; 关闭时行为与未部署本功能完全一致
+  enroll-token: ""         # 注册 Token, 也可用环境变量 AGENT_ENROLL_TOKEN 覆盖(非空即覆盖)
+  offline-seconds: 45      # 离线判定秒数, 必须大于心跳周期(15s)
+  url-ttl: 24h             # 客户端播放 URL 的签名时效
+  fallback-to-local: true  # 无可用节点时回退本机代理; 置 false 则直接返回 503
+```
+
+> ⚠️ **`enroll-token` 等同共享盘访问权**: 持有它就能往网关注册机器成为节点,
+> 而节点可以从面板换取**账号级** Google 直链。不要外传; 一旦泄露,
+> 在配置里换掉并重启即可 —— 旧 Token 立即失效, 已注册节点不受影响
+> (节点凭据是注册时各自签发的, 与注册 Token 无关)。
+
+接入一台节点:
+
+1. 打开 `https://<网关>/ge2o/web` 的「节点管理」页, 点「复制安装命令」;
+2. 在目标机器上以 root 执行该命令(即 `curl -fsSL <网关>/install.sh | sudo bash -s -- --master <网关> --token <注册Token>`),
+   脚本会下载对应架构的二进制、注册、装好 systemd 服务;
+3. 15 秒内节点出现在列表且状态为在线, 播放请求此后会优先调度到它。
+
+NAT 后的机器: 安装命令追加 `--public-url http://<公网地址>:8790`(或反代后的 https 地址),
+否则网关推导的地址不可达。节点升级 = 重跑安装脚本(幂等, 不会重新注册);
+卸载 = 停用 systemd 服务 + 在网页删除该节点。
+
 ### 其他
 
 | 段 | 说明 |
@@ -221,6 +249,16 @@ grep '\[直链代理\]' /var/log/ge2o/ge2o.log
 - 只有 `检测到挂载路径` 却没有 `开始传输`, 说明面板那一跳失败了, 继续往下看 `回源处理`
 - 看到面板的中文报错文案 = 面板侧的问题(路径没缓存、Token 不对等), 不是本机故障
 
+agent 代理网络的调度/回退日志前缀是 `[agent 网络]`:
+
+```bash
+grep '\[agent 网络\]' /var/log/ge2o/ge2o.log
+```
+
+- 调度成功时不会出现 WARN; 字节由节点直接承载(`/ge2o/web`「节点管理」里可看到节点的活跃流数)
+- 「当前无可用节点, 回退本机代理」= 此刻没有在线节点, 播放仍可用(走本机)
+- 「无可用节点且已禁用本机回退」= `fallback-to-local: false` 且无节点, 客户端收到 503
+
 ## 回滚
 
 ```bash
@@ -229,7 +267,7 @@ cp -a /opt/ge2o/ge2o /opt/ge2o/ge2o.bak
 cp -a /opt/ge2o/config.yml /opt/ge2o/config.yml.bak
 
 # 2 出问题先关功能开关(不用改代码)
-#    config.yml 里把 gdrive.enable / emby.strm.proxy.enable 置 false
+#    config.yml 里把 gdrive.enable / emby.strm.proxy.enable / agent-network.enable 置 false
 #    然后 systemctl restart ge2o
 
 # 3 要回到旧二进制

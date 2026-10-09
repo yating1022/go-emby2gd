@@ -22,6 +22,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Response Cache Middleware](./response-cache.md) | `internal/web/cache` contracts: route whitelist, whole-body buffering, per-response cap, test landmines | Filled |
 | [Outbound HTTP Proxying](./http-proxy.md) | Request/response header contracts, header canonicalisation, `Accept-Encoding: identity`, streaming rules | Filled |
 | [GD Panel Direct Link](./gdrive-panel.md) | `internal/service/gdrive`: panel `/api/dl` contract, token cache margin invariant, retry codes, long-playback contract | Filled |
+| [Agent Proxy Network](./agent-network.md) | master/agent proxy network: endpoints, signed URLs, margin chain, registry state file, install/release contract | Filled |
 
 > Note: this project has no database. `database-guidelines.md` was repurposed as
 > "Configuration & State Management" — all state is in-memory and rebuildable.

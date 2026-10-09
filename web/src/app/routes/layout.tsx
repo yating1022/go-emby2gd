@@ -59,6 +59,11 @@ const navData: NavItem[] = [
     ],
   },
   {
+    label: "节点管理",
+    to: "/agent_network",
+    children: [],
+  },
+  {
     label: "日志",
     to: "/log",
     children: [],

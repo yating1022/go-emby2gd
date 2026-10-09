@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门核对（go test -race 全绿、无提交）"}
+{"file": ".trellis/tasks/10-08-agent-node/prd.md", "reason": "验收标准 C-AC 与「协议面零改动」约束逐条核对"}
+{"file": ".trellis/tasks/10-08-agent-node/design.md", "reason": "核对余量修正范围未越界（只动常量/注释/测试）"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "与 master 侧余量链的跨端一致性（25s < 30s）"}

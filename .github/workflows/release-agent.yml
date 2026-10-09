@@ -1,0 +1,92 @@
+# agent 二进制发布流水线（网关任务 10-08-agent-proxy-network 的子任务 C；其 design §2.8）
+#
+# 触发：
+#   - push tag `agent-v*` → 测试 → 构建 → 创建 Release（三件资产）
+#   - workflow_dispatch  → 手动试跑：只测试 + 构建 + 上传 Actions artifact，不发 Release
+#
+# 资产名与 master 安装脚本（internal/service/agentnet/installshell/agent-install.sh，
+# 经网关 /install.sh 端点下发）**逐字一致**：
+#   gd-agent-linux-amd64 / gd-agent-linux-arm64 / checksums.txt
+# 安装脚本按 `/releases/latest/download/<asset>` 直下，改这里必须同步改脚本。
+name: release-agent
+
+on:
+  push:
+    tags:
+      - "agent-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go（版本取自 agent/go.mod，零第三方依赖）
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+
+      - name: 静态检查与测试（测试不过就不出 Release）
+        run: |
+          go vet ./...
+          go test -race ./...
+
+      - name: 交叉编译静态二进制（linux/amd64 + linux/arm64）
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#agent-v}"
+          else
+            VERSION="dev"
+          fi
+          echo "构建版本：${VERSION}"
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" go build \
+              -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "dist/gd-agent-linux-${arch}" .
+          done
+          file dist/gd-agent-linux-amd64 dist/gd-agent-linux-arm64
+
+      - name: 生成校验和
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum gd-agent-linux-amd64 gd-agent-linux-arm64 > checksums.txt
+          cat checksums.txt
+
+      - name: 冒烟（产物能跑、版本号正确）
+        run: |
+          set -euo pipefail
+          ./dist/gd-agent-linux-amd64 version
+          ./dist/gd-agent-linux-amd64 help > /dev/null
+
+      - name: 创建 Release（仅 tag 触发）
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --verify-tag \
+            --title "gd-agent ${GITHUB_REF_NAME}" \
+            --notes "agent 节点二进制（linux/amd64、linux/arm64，静态链接，零第三方依赖）与 checksums.txt。安装：在 master 网页「节点」页复制一键命令执行。" \
+            dist/gd-agent-linux-amd64 \
+            dist/gd-agent-linux-arm64 \
+            dist/checksums.txt
+
+      - name: 上传产物（手动试跑时）
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gd-agent-dist
+          path: agent/dist/*
+          if-no-files-found: error

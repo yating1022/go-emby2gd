@@ -18,6 +18,7 @@ services:
       - ./custom-css:/app/custom-css
       - ./lib:/app/lib
       - ./openlist-local-tree:/app/openlist-local-tree
+      - ./agent-network:/app/agent-network
     ports:
       - 8095:8095 # http
       - 8094:8094 # https

@@ -23,8 +23,7 @@ func TestFetchStream_RetryRefreshesStaleDirectLink(t *testing.T) {
 	stale := newFakeDrive(t, func(r *http.Request) (int, string) {
 		// 在第一次请求期间模拟"另一个并发请求刷新了令牌":
 		// 令牌代次被推进, 但这条路径的直链没有跟着变。
-		putToken(map[string]string{"Authorization": "Bearer concurrent-refresh"},
-			time.Now().Add(time.Hour), time.Now())
+		putToken(map[string]string{"Authorization": "Bearer concurrent-refresh"}, "", time.Now().Add(time.Hour), time.Now())
 		return http.StatusNotFound, "stale direct link"
 	})
 
@@ -34,8 +33,7 @@ func TestFetchStream_RetryRefreshesStaleDirectLink(t *testing.T) {
 	withTestConfig(t, panel.url())
 
 	// 预置: 令牌看起来有效, 但这条路径缓存的是失效直链
-	generation := putToken(map[string]string{"Authorization": "Bearer stale-token"},
-		time.Now().Add(time.Hour), time.Now())
+	generation := putToken(map[string]string{"Authorization": "Bearer stale-token"}, "", time.Now().Add(time.Hour), time.Now())
 	putCachedURL(testPath, stale.url(), generation)
 
 	resp, err := FetchStream(context.Background(), testPath, "")
@@ -78,8 +76,7 @@ func TestFetchStream_SecondRequestReusesURLAfterUnrelatedTokenRefresh(t *testing
 	}
 
 	// 别的路径的刷新推进了全局令牌槽 —— 本路径的直链并没有失效
-	putToken(map[string]string{"Authorization": "Bearer refreshed-elsewhere"},
-		time.Now().Add(time.Hour), time.Now())
+	putToken(map[string]string{"Authorization": "Bearer refreshed-elsewhere"}, "", time.Now().Add(time.Hour), time.Now())
 
 	resp, err = FetchStream(context.Background(), testPath, "")
 	if err != nil {

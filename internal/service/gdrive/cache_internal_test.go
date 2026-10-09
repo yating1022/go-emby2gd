@@ -81,9 +81,9 @@ func TestTokenDeadline(t *testing.T) {
 func TestGetToken_UnusableDeadlineNeverServed(t *testing.T) {
 	withTestConfig(t, "")
 
-	putToken(map[string]string{"Authorization": "Bearer x"}, time.Time{}, time.Now())
+	putToken(map[string]string{"Authorization": "Bearer x"}, "", time.Time{}, time.Now())
 
-	if _, _, ok := getToken(); ok {
+	if _, _, _, ok := getToken(); ok {
 		t.Error("没有过期信息的条目不应被视为可用")
 	}
 }
@@ -94,13 +94,13 @@ func TestGetToken_UnusableDeadlineNeverServed(t *testing.T) {
 func TestPutToken_AdvancesGenerationEvenWhenExpired(t *testing.T) {
 	withTestConfig(t, "")
 
-	first := putToken(map[string]string{"Authorization": "Bearer x"}, time.Time{}, time.Now())
-	second := putToken(map[string]string{"Authorization": "Bearer y"}, time.Time{}, time.Now())
+	first := putToken(map[string]string{"Authorization": "Bearer x"}, "", time.Time{}, time.Now())
+	second := putToken(map[string]string{"Authorization": "Bearer y"}, "", time.Time{}, time.Now())
 
 	if second <= first {
 		t.Errorf("代次应单调递增, first=%d, second=%d", first, second)
 	}
-	if _, _, ok := getToken(); ok {
+	if _, _, _, ok := getToken(); ok {
 		t.Error("立即过期的条目不应被视为可用")
 	}
 }
@@ -111,8 +111,7 @@ func TestPutToken_AdvancesGenerationEvenWhenExpired(t *testing.T) {
 func TestTokenSlotIsGlobal(t *testing.T) {
 	withTestConfig(t, "")
 
-	generation := putToken(map[string]string{"Authorization": "Bearer shared"},
-		time.Now().Add(time.Hour), time.Now())
+	generation := putToken(map[string]string{"Authorization": "Bearer shared"}, "", time.Now().Add(time.Hour), time.Now())
 
 	for _, path := range []string{"/a/x.mkv", "/b/y.mkv", "/c/z.mkv"} {
 		putCachedURL(path, "https://drive.example.com"+path, generation)
@@ -164,7 +163,7 @@ func TestCachedTarget_RequiresBothCaches(t *testing.T) {
 	withTestConfig(t, "")
 
 	// 只有令牌, 没有 URL
-	putToken(map[string]string{"Authorization": "Bearer x"}, time.Now().Add(time.Hour), time.Now())
+	putToken(map[string]string{"Authorization": "Bearer x"}, "", time.Now().Add(time.Hour), time.Now())
 	if _, ok := cachedTarget(testPath, 0); ok {
 		t.Error("缺少 URL 缓存时不应命中")
 	}
@@ -184,8 +183,7 @@ func TestCachedTarget_RequiresBothCaches(t *testing.T) {
 func TestCachedTarget_MinGeneration(t *testing.T) {
 	withTestConfig(t, "")
 
-	generation := putToken(map[string]string{"Authorization": "Bearer x"},
-		time.Now().Add(time.Hour), time.Now())
+	generation := putToken(map[string]string{"Authorization": "Bearer x"}, "", time.Now().Add(time.Hour), time.Now())
 	putCachedURL(testPath, "https://drive.example.com/x", generation)
 
 	if _, ok := cachedTarget(testPath, generation); ok {
@@ -201,14 +199,14 @@ func TestResetCache(t *testing.T) {
 	withTestConfig(t, "")
 
 	putCachedURL(testPath, "https://drive.example.com/x", 1)
-	putToken(map[string]string{"Authorization": "Bearer x"}, time.Now().Add(time.Hour), time.Now())
+	putToken(map[string]string{"Authorization": "Bearer x"}, "", time.Now().Add(time.Hour), time.Now())
 
 	resetCache()
 
 	if _, _, ok := getCachedURL(testPath); ok {
 		t.Error("resetCache 之后 URL 缓存应为空")
 	}
-	if _, _, ok := getToken(); ok {
+	if _, _, _, ok := getToken(); ok {
 		t.Error("resetCache 之后令牌槽应为空")
 	}
 }

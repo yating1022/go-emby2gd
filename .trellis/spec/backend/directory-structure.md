@@ -26,6 +26,7 @@ go-emby2openlist/
 │   ├── model/               # Cross-package types: HttpRes[T], Response
 │   ├── service/
 │   │   ├── emby/            # Core business: proxy, auth, redirect, items (16 files)
+│   │   ├── agentnet/        # Master side of the agent proxy network: registry, signing, endpoints, install shell
 │   │   ├── openlist/        # OpenList API client
 │   │   │   └── localtree/   # Local directory-tree sync feature
 │   │   ├── m3u8/            # Transcoded playlist in-memory cache + proxy
@@ -33,16 +34,18 @@ go-emby2openlist/
 │   │   ├── path/            # emby→openlist path conversion
 │   │   ├── lib/ffmpeg/      # ffmpeg binary wrapper + auto-download
 │   │   ├── service.go / log.go / model.go   # ge2o's own endpoints (secret validate, WS log sync)
-│   ├── util/                # 16 small utility subpackages (all plural-named)
+│   ├── util/                # 17 small utility subpackages (all plural-named)
+│   ├── e2e/                 # Test-only package: cross-process E2E for the agent proxy network
 │   └── web/                 # gin server, route table, middleware
 │       ├── cache/           # Response cache middleware
 │       ├── webport/         # Global port variables
 │       └── webproxy/        # HTTP_PROXY/HTTPS_PROXY parsing
+├── agent/                   # Nested Go module: gd-agent (proxy-network node). Own go.mod; root ./... skips it
 ├── cmd/                     # Dev-time standalone tools (fake_mp4, fake_mp3_1) — not shipped
 ├── web/                     # Frontend: embed.go + src/ (React Router 7)
 ├── build.sh / build_web.sh  # 14-platform cross-compile / frontend build
 ├── Dockerfile               # 3-stage: node → golang → alpine
-└── .github/workflows/       # build.yml (release binaries), docker.yml (tag images)
+└── .github/workflows/       # build.yml (release binaries), docker.yml (tag images), release-agent.yml (gd-agent releases)
 ```
 
 ---
@@ -78,7 +81,18 @@ Root cause: `webport`/`webproxy`/`cache` are really infrastructure/global-state 
 2. `parseFlag()` — `-p`/`-ps` ports (default 8095/8094), `-dr` data root; ports go to `webport` globals, **not** config
 3. `config.ReadFromFile(<dataRoot>/config.yml)`
 4. `localtree.Init()` — no-op unless `openlist.local-tree-gen.enable`
-5. `web.Listen()` — middleware chain: `referrerPolicySetter` → `emby.ApiKeyChecker()` → `emby.DownloadStrategyChecker()` → optional `cache.*`; then the catch-all route
+5. `agentnet.Init()` — loads the agent registry from `<BasePath>/agent-network/agents.json` (fatal on corrupt file; `main.go:43`)
+6. `web.Listen()` — middleware chain: `referrerPolicySetter` → `emby.ApiKeyChecker()` → `emby.DownloadStrategyChecker()` → optional `cache.*`; then the catch-all route
+
+### Nested module + test-only package (2026-10)
+
+- `agent/` is a **separate Go module** (module path `github.com/yating1022/go-emby2gd/agent`, zero
+  third-party dependencies). The root module's `./...` patterns and `build.sh` skip it automatically;
+  its checks are `cd agent && gofmt -l . && go vet ./... && go test -race ./...`. It is released
+  independently via tag `agent-v*` (agent-network.md §3.8).
+- `internal/e2e/` is a **test-only package** (no non-test files) holding the agent-network E2E matrix
+  (real agent subprocess + real gateway server + mock upstreams). It may import production packages;
+  production code must never import it.
 
 ---
 

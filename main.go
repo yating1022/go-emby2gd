@@ -12,6 +12,7 @@ import (
 
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/constant"
+	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/agentnet"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/openlist/localtree"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/logs"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/logs/colors"
@@ -35,6 +36,11 @@ func main() {
 
 	logs.Info("正在初始化本地目录树模块...")
 	if err := localtree.Init(); err != nil {
+		log.Fatal(colors.ToRed(err.Error()))
+	}
+
+	logs.Info("正在初始化 agent 代理网络模块...")
+	if err := agentnet.Init(); err != nil {
 		log.Fatal(colors.ToRed(err.Error()))
 	}
 

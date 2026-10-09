@@ -1,0 +1,3 @@
+# 本地/CI 构建产物（发布资产由 GitHub Actions 生成，不入库）
+dist/
+gd-agent

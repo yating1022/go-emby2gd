@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门与测试/构建前置条件"}
+{"file": ".trellis/tasks/10-08-agent-proxy-network/design.md", "reason": "集成评审依据：协议、开关、错误语义的一致性（§2/§6）"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "跨端一致性核对（签名格式/字段名/错误码）"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "核对日志级别与无凭据泄漏（s/secret/token 不进日志）"}

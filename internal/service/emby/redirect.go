@@ -1,6 +1,7 @@
 package emby
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
+	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/agentnet"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/gdrive"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/openlist"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/service/path"
@@ -106,6 +108,34 @@ func Redirect2OpenlistLink(c *gin.Context) {
 		// 必须在 ProxyGDrive 之前触发: ProxyGDrive 会阻塞到本次传输彻底结束,
 		// 放在它之后触发要等整部片子播完才会发出, 等于没有触发。
 		go sendOpenStreamPlaybackInfoReqToOrigin(itemInfo)
+
+		// 4.1 agent 代理网络: 有可用节点时把客户端 302 到节点上的签名地址,
+		//     媒体字节既不经过本网关, 也不经过 Emby
+		//
+		// 前置条件: agent 网络启用【且】gdrive 启用(直链来源是面板);
+		// 语义分级(见 design §2.4): 无可用节点是唯一受 fallback-to-local 控制的
+		// 分支, 其余内部故障一律记 WARN 后走原有流程 —— 绝不因新功能让播放挂掉。
+		if cfg := config.C.AgentNetwork; cfg.IsEnabled() && gdrive.IsEnabled() {
+			agentURL, pickErr := agentnet.PickAndSign(gdPath)
+			switch {
+			case pickErr == nil:
+				// 与既有 302 分支同一惯例: 10 分钟内不重复调度
+				c.Header(cache.HeaderKeyExpired, cache.Duration(time.Minute*10))
+				c.Redirect(http.StatusTemporaryRedirect, agentURL)
+				return
+			case errors.Is(pickErr, agentnet.ErrNoAgent):
+				if !cfg.FallbackEnabled() {
+					logs.Warn("[agent 网络] 无可用节点且已禁用本机回退, 拒绝本次播放: %s", gdPath)
+					c.String(http.StatusServiceUnavailable, "无可用 agent 节点且已禁用本机回退")
+					return
+				}
+				logs.Warn("[agent 网络] 当前无可用节点, 回退本机代理: %s", gdPath)
+			case errors.Is(pickErr, agentnet.ErrDisabled):
+				// 竞态兜底: 配置刚被关闭(热路径上本应已判过), 什么都不做
+			default:
+				logs.Warn("[agent 网络] 调度失败, 回退本机代理: %v", pickErr)
+			}
+		}
 
 		written, proxyErr := streamproxy.ProxyGDrive(c.Writer, c.Request, gdPath)
 		if written {
