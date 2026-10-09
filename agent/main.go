@@ -151,11 +151,28 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		Logger:    logger,
 		Enabled:   enabled.Load,
 	})
+	// 读前缓存：预算 0 = 关闭（数据面行为与不带缓存的版本逐字节一致）；
+	// 块龄超过 CACHE_MAX_AGE_MINUTES 一律按 miss 处理（同大小替换的兜底）。
+	// 上游客户端由数据面与预取共用，避免两套连接池互相抢配额。
+	client := proxy.NewUpstreamClient()
+	cache := proxy.NewBlockCacheWithMaxAge(
+		int64(cfg.CacheBudgetMB)<<20, time.Duration(cfg.CacheMaxAgeMinutes)*time.Minute)
+	prefetcher := proxy.NewPrefetcher(proxy.PrefetcherConfig{
+		Cache:     cache,
+		Links:     links,
+		Client:    client,
+		Logger:    logger,
+		HeadBytes: int64(cfg.PrefetchHeadMB) << 20,
+		TailBytes: int64(cfg.PrefetchTailMB) << 20,
+	})
 	handler := proxy.NewHandler(proxy.Config{
 		SignKey:       signKey,
 		MaxConcurrent: cfg.MaxConcurrent,
 		Links:         links,
 		Logger:        logger,
+		Client:        client,
+		Cache:         cache,
+		Prefetch:      prefetcher,
 	})
 	beat := heartbeat.New(heartbeat.Options{
 		MasterURL:     cfg.MasterURL,
@@ -192,6 +209,10 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 			"master_url", cfg.MasterURL,
 			"max_concurrent", cfg.MaxConcurrent,
 			"public_base_url", cfg.PublicBaseURL,
+			"cache_budget_mb", cfg.CacheBudgetMB,
+			"cache_max_age_minutes", cfg.CacheMaxAgeMinutes,
+			"prefetch_head_mb", cfg.PrefetchHeadMB,
+			"prefetch_tail_mb", cfg.PrefetchTailMB,
 		)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err

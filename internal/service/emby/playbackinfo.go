@@ -51,6 +51,13 @@ func TransferPlaybackInfo(c *gin.Context) {
 		return
 	}
 
+	// 网关预热: 用户"即将播放"时异步预热首触数据(不阻塞、不影响本次响应)
+	//
+	// 用 defer 而不是放在函数末尾: 本条 handler 有多处提前 return(指定
+	// MediaSourceId 的缓存分支、直播、本地媒体等), 它们同样发生在"即将播放"的
+	// 语义下; 预热只与条目路径有关, 与响应从哪个分支返回无关。
+	defer TryFire(c, itemInfo.Id)
+
 	// 如果是远程资源, 直接代理到源服务器
 	if handleSpecialPlayback(c, itemInfo) {
 		c.Header(cache.HeaderKeyExpired, "-1")
@@ -395,6 +402,20 @@ func LoadCacheItems(c *gin.Context) {
 	defer func() {
 		jsons.OkResp(c.Writer, resJson)
 	}()
+
+	// 网关预热: 用户浏览单条 movie/episode 详情时, 异步预热首触数据(见 preheat.go)
+	//
+	// 放在转码版本逻辑之前: 预热与该功能是否开启无关, 而下面的分支有多个提前
+	// return(未开启该功能、非 movie/episode、特定客户端), 放在末尾会漏掉它们。
+	// preheatReady() 为 false 时零开销; 该解析只读请求元数据, 即便与下面的解析
+	// 重复执行也没有副作用。
+	if preheatReady() {
+		if itemType, ok := resJson.Attr("Type").String(); ok && ValidCacheItemsTypeRegex.MatchString(itemType) {
+			if itemInfo, err := resolveItemInfo(c, RouteItems); err == nil {
+				TryFire(c, itemInfo.Id)
+			}
+		}
+	}
 
 	// 未开启转码资源获取功能
 	if !config.C.VideoPreview.Enable {

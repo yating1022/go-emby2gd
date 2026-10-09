@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/logs"
+	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/maps"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/strs"
 	"gopkg.in/yaml.v3"
 )
@@ -30,6 +31,21 @@ const (
 	// defaultAgentURLTTL 客户端 URL 签名时效默认值
 	defaultAgentURLTTL = time.Hour * 24
 )
+
+// agent 节点调度策略取值(schedule-strategy 的合法值)
+//
+// 导出给调度方(agentnet)与调用点比较, 避免把字面量散落在两处。
+const (
+	// ScheduleStrategyLeastActive 最少活跃连接优先(默认, 与历史行为一致)
+	ScheduleStrategyLeastActive = "least-active"
+	// ScheduleStrategyPriority 固定优先级优先(优先级数字越小越优先, 忽略活跃连接数)
+	ScheduleStrategyPriority = "priority"
+)
+
+// validAgentScheduleStrategy 用于校验用户配置的调度策略是否合法
+var validAgentScheduleStrategy = map[string]struct{}{
+	ScheduleStrategyLeastActive: {}, ScheduleStrategyPriority: {},
+}
 
 // AgentNetwork agent 代理网络(master 侧)配置
 //
@@ -59,7 +75,20 @@ type AgentNetwork struct {
 	// 该字段的语义与 strm 代理的 max-concurrent-streams 同款:
 	// 显式 false 与"未配置"不能共用零值, 需要靠 UnmarshalYAML 区分。
 	FallbackToLocal bool `yaml:"fallback-to-local"`
+	// PreheatEnable 是否启用"网关预热", 默认 true
+	//
+	// 用户在详情页浏览 / 请求 PlaybackInfo 时, 异步触发一次极小的 Range 请求,
+	// 把节点侧读前缓存的首触预取提前完成, 起播更接近秒开。
+	//
+	// 用指针区分"未配置"(nil, 取默认值 true)与"显式 false";
+	// 关闭后行为与未部署本功能完全一致。
+	PreheatEnable *bool `yaml:"preheat-enable"`
 
+	// scheduleStrategy 节点调度策略(agent-network.schedule-strategy)
+	//
+	// 非导出: 外部只通过 ScheduleStrategy() 读取(与其它 getter 同款),
+	// 取值在 Init 里完成校验与缺省填充。
+	scheduleStrategy string
 	// fallbackToLocalSet 记录配置中是否显式出现 fallback-to-local
 	fallbackToLocalSet bool
 	// urlTTL 初始化后的客户端 URL 签名时效
@@ -68,15 +97,20 @@ type AgentNetwork struct {
 
 // UnmarshalYAML 自定义解析 agent 网络配置
 //
-// 唯一的目的是识别 fallback-to-local 是否被显式配置:
-// 该字段的默认值是 true, 与 bool 零值 false 冲突, 不能共用零值判断。
+// 目的有两个:
+//   - 识别 fallback-to-local 是否被显式配置: 该字段的默认值是 true,
+//     与 bool 零值 false 冲突, 不能共用零值判断;
+//   - 逐字段搬运(下面的清单即全部可配置项): 新增字段必须同步加进来,
+//     否则该字段会被静默丢弃(有单测钉住)。
 func (a *AgentNetwork) UnmarshalYAML(value *yaml.Node) error {
 	type plainAgentNetwork struct {
-		Enable          bool   `yaml:"enable"`
-		EnrollToken     string `yaml:"enroll-token"`
-		OfflineSeconds  int    `yaml:"offline-seconds"`
-		URLTTL          string `yaml:"url-ttl"`
-		FallbackToLocal *bool  `yaml:"fallback-to-local"`
+		Enable           bool   `yaml:"enable"`
+		EnrollToken      string `yaml:"enroll-token"`
+		OfflineSeconds   int    `yaml:"offline-seconds"`
+		URLTTL           string `yaml:"url-ttl"`
+		FallbackToLocal  *bool  `yaml:"fallback-to-local"`
+		PreheatEnable    *bool  `yaml:"preheat-enable"`
+		ScheduleStrategy string `yaml:"schedule-strategy"`
 	}
 
 	var v plainAgentNetwork
@@ -88,6 +122,8 @@ func (a *AgentNetwork) UnmarshalYAML(value *yaml.Node) error {
 	a.EnrollToken = v.EnrollToken
 	a.OfflineSeconds = v.OfflineSeconds
 	a.URLTTL = v.URLTTL
+	a.PreheatEnable = v.PreheatEnable
+	a.scheduleStrategy = v.ScheduleStrategy
 	if v.FallbackToLocal != nil {
 		a.FallbackToLocal = *v.FallbackToLocal
 		a.fallbackToLocalSet = true
@@ -136,7 +172,18 @@ func (a *AgentNetwork) Init() error {
 		a.FallbackToLocal = true
 	}
 
-	// 5 未启用时不再校验凭据, 行为与未部署本功能完全一致
+	// 5 调度策略: 缺省取 least-active(与历史行为一致);
+	// 非法值同样与 enable 无关地提前校验, 避免启用后才发现配错
+	a.scheduleStrategy = strings.TrimSpace(a.scheduleStrategy)
+	if a.scheduleStrategy == "" {
+		a.scheduleStrategy = ScheduleStrategyLeastActive
+	}
+	if _, ok := validAgentScheduleStrategy[a.scheduleStrategy]; !ok {
+		return fmt.Errorf("agent-network.schedule-strategy 配置错误: %s, 有效值: %v",
+			a.scheduleStrategy, maps.Keys(validAgentScheduleStrategy))
+	}
+
+	// 6 未启用时不再校验凭据, 行为与未部署本功能完全一致
 	//
 	// 校验错误消息里只提字段名, 绝不回显凭据值。
 	if !a.Enable {
@@ -178,4 +225,26 @@ func (a *AgentNetwork) FallbackEnabled() bool {
 		return true
 	}
 	return a.FallbackToLocal
+}
+
+// ScheduleStrategy 获取节点调度策略
+//
+// 配置对象为空(或未经 Init 填充)时按默认值 least-active 处理:
+// 与历史行为一致, 不会因为读到空串而改变既有选点逻辑。
+func (a *AgentNetwork) ScheduleStrategy() string {
+	if a == nil || a.scheduleStrategy == "" {
+		return ScheduleStrategyLeastActive
+	}
+	return a.scheduleStrategy
+}
+
+// PreheatEnabled 获取是否启用网关预热
+//
+// 配置对象为空或未配置该项时按默认值 true 处理: 预热是纯增益的尝试行为,
+// 默认开启; 只有显式配置 preheat-enable: false 才关闭。
+func (a *AgentNetwork) PreheatEnabled() bool {
+	if a == nil || a.PreheatEnable == nil {
+		return true
+	}
+	return *a.PreheatEnable
 }

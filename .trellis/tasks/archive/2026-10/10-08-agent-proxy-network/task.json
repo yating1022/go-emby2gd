@@ -1,0 +1,30 @@
+{
+  "id": "agent-proxy-network",
+  "name": "agent-proxy-network",
+  "title": "master/agent 代理网络（网关为 master）",
+  "description": "",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "fruits",
+  "assignee": "fruits",
+  "createdAt": "2026-10-08",
+  "completedAt": "2026-10-09",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "10-08-agent-master-side",
+    "10-08-agent-node",
+    "10-08-agent-web-page"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

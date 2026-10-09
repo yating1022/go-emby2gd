@@ -18,6 +18,13 @@ func CustomLogger(port string) gin.HandlerFunc {
 		// 处理请求
 		c.Next()
 
+		// 节点心跳(15s 一次 × N 个节点)不记请求日志: 会把日志刷爆, 且没有排查价值 ——
+		// 心跳失败(401)会由 agent 侧的退避 ERROR 日志体现, 这里静音不丢信息。
+		// 只静音心跳; enroll / download-link 频率低且有排查价值, 照常记录。
+		if c.Request.URL.Path == constant.Route_AgentHeartbeat {
+			return
+		}
+
 		// 记录日志
 		logs.Raw("%s %s | %s | %s | %s | %s %s | %s %s\n",
 			colors.ToYellow("[ge2o:"+constant.CurrentVersion+"]"),

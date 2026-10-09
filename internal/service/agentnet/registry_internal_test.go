@@ -121,6 +121,9 @@ func TestEnroll_CreatesRecordAndPersists(t *testing.T) {
 	if !file.Agents[0].Enabled {
 		t.Error("新注册的节点应默认为启用")
 	}
+	if file.Agents[0].Priority != 0 {
+		t.Errorf("新注册节点的优先级应默认为 0, 实际: %d", file.Agents[0].Priority)
+	}
 	// 易失字段不落盘
 	if strings.Contains(string(data), "last_seen_at") || strings.Contains(string(data), "active_streams") {
 		t.Error("last_seen_at / active_streams 属于易失状态, 不应落盘")
@@ -146,6 +149,11 @@ func TestEnroll_IdempotentByMachineID(t *testing.T) {
 		Now:           time.Now(),
 	}); err != nil {
 		t.Fatalf("心跳失败: %v", err)
+	}
+
+	// 管理员先自定义名称与优先级: 重注册不得覆盖这两项(属于管理员状态)
+	if _, err := defaultRegistry.setProfile(first.AgentID, "自定义名称", 3, time.Now()); err != nil {
+		t.Fatalf("更新节点资料失败: %v", err)
 	}
 
 	// 同一台机器重跑安装脚本: 换主机名与端口, 复用记录但轮换凭据
@@ -177,8 +185,18 @@ func TestEnroll_IdempotentByMachineID(t *testing.T) {
 	if !list[0].LastSeenAt.IsZero() || list[0].ActiveStreams != 0 {
 		t.Error("重复注册应清零易失状态(等下一次心跳重新探测)")
 	}
-	if list[0].Name != "node-renamed" || list[0].ListenPort != 9999 {
-		t.Errorf("重复注册应更新节点信息: %+v", list[0])
+	if list[0].ListenPort != 9999 {
+		t.Errorf("重复注册应更新节点上报的信息: %+v", list[0])
+	}
+	// 名称与优先级是管理员状态: 节点每次升级都要重跑脚本, 不能被上报的主机名擦掉
+	if list[0].Name != "自定义名称" {
+		t.Errorf("重复注册不得覆盖管理员设置的名称: %q", list[0].Name)
+	}
+	if list[0].Priority != 3 {
+		t.Errorf("重复注册不得重置管理员设置的优先级: %d", list[0].Priority)
+	}
+	if second.Name != "自定义名称" {
+		t.Errorf("复用分支返回的展示名应是记录里的名称: %q", second.Name)
 	}
 
 	data, err := os.ReadFile(agentsFilePath(basePath))
@@ -393,6 +411,119 @@ func TestSetEnabledAndRemove(t *testing.T) {
 	}
 }
 
+// TestSetProfile_PersistsAndReloads 节点资料(名称 + 优先级)的落盘 / 重载
+func TestSetProfile_PersistsAndReloads(t *testing.T) {
+	basePath := setupStateDir(t)
+	setupAgentConfig(t, true)
+
+	result, err := defaultRegistry.enroll(testEnrollParams("machine-1"))
+	if err != nil {
+		t.Fatalf("注册失败: %v", err)
+	}
+
+	rec, err := defaultRegistry.setProfile(result.AgentID, "家人云", 7, time.Now())
+	if err != nil {
+		t.Fatalf("更新节点资料失败: %v", err)
+	}
+	if rec.Name != "家人云" || rec.Priority != 7 {
+		t.Fatalf("更新结果不正确: %+v", rec)
+	}
+
+	// 落盘: 名称与优先级都要写进 agents.json
+	data, err := os.ReadFile(agentsFilePath(basePath))
+	if err != nil {
+		t.Fatalf("读取注册表失败: %v", err)
+	}
+	if !strings.Contains(string(data), `"name": "家人云"`) || !strings.Contains(string(data), `"priority": 7`) {
+		t.Errorf("节点资料应落盘: %s", data)
+	}
+
+	// 重启后从磁盘重新加载: 名称与优先级均保留
+	simulateRestart()
+	list, err := defaultRegistry.snapshot()
+	if err != nil {
+		t.Fatalf("重启后加载注册表失败: %v", err)
+	}
+	if len(list) != 1 || list[0].Name != "家人云" || list[0].Priority != 7 {
+		t.Fatalf("重启后节点资料应保留: %+v", list)
+	}
+
+	if _, err := defaultRegistry.setProfile("no-such-agent", "x", 1, time.Now()); err != errAgentNotFound {
+		t.Errorf("对不存在的节点更新资料应返回节点不存在: %v", err)
+	}
+}
+
+// TestLoadAgentsFile_PriorityBackwardCompatible 落盘结构的优先级向后兼容
+//
+// 旧版 agents.json 没有 priority 字段: 缺省即为 0(默认值 = 最优先),
+// 不需要指针或升级 schema 版本; 有值的文件必须原样加载。
+func TestLoadAgentsFile_PriorityBackwardCompatible(t *testing.T) {
+	old := `{"version":1,"agents":[{"id":"a1","machine_id":"m1","name":"旧节点","secret":"s1","sign_key":"k1","listen_port":8790,"enabled":true,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}]}`
+	newer := `{"version":1,"agents":[{"id":"a1","machine_id":"m1","name":"新节点","secret":"s1","sign_key":"k1","listen_port":8790,"priority":42,"enabled":true,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}]}`
+
+	cases := []struct {
+		name         string
+		content      string
+		wantName     string
+		wantPriority int
+	}{
+		{"旧文件无 priority 字段", old, "旧节点", 0},
+		{"新文件带 priority", newer, "新节点", 42},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), fileName)
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("写入注册表失败: %v", err)
+			}
+			records, err := loadAgentsFile(path)
+			if err != nil {
+				t.Fatalf("加载注册表失败: %v", err)
+			}
+			rec := records["a1"]
+			if rec == nil {
+				t.Fatal("节点记录未加载")
+			}
+			if rec.Priority != tc.wantPriority {
+				t.Errorf("Priority = %d, want %d", rec.Priority, tc.wantPriority)
+			}
+			if rec.Name != tc.wantName {
+				t.Errorf("Name = %q, want %q", rec.Name, tc.wantName)
+			}
+		})
+	}
+}
+
+// TestEnroll_NewRecordDefaults 全新记录的初始资料
+//
+// 名称取上报主机名, 优先级为 0(未设置 = 最优先)。
+func TestEnroll_NewRecordDefaults(t *testing.T) {
+	setupStateDir(t)
+	setupAgentConfig(t, true)
+	simulateRestart()
+
+	result, err := defaultRegistry.enroll(testEnrollParams("machine-1"))
+	if err != nil {
+		t.Fatalf("注册失败: %v", err)
+	}
+	list, err := defaultRegistry.snapshot()
+	if err != nil {
+		t.Fatalf("读取注册表失败: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("注册后应有 1 条记录, 实际 %d", len(list))
+	}
+	if list[0].Name != "node-machine-1" {
+		t.Errorf("新记录的名称应取上报主机名, 实际 %q", list[0].Name)
+	}
+	if list[0].Priority != 0 {
+		t.Errorf("新记录的优先级应为 0, 实际 %d", list[0].Priority)
+	}
+	if list[0].ID != result.AgentID {
+		t.Errorf("返回的 id 与记录不一致: %s != %s", result.AgentID, list[0].ID)
+	}
+}
+
 func TestMutate_PersistFailureRollsBack(t *testing.T) {
 	basePath := setupStateDir(t)
 	setupAgentConfig(t, true)
@@ -414,6 +545,9 @@ func TestMutate_PersistFailureRollsBack(t *testing.T) {
 	if _, err := defaultRegistry.setEnabled(result.AgentID, false, time.Now()); err == nil {
 		t.Fatal("落盘失败时应返回错误")
 	}
+	if _, err := defaultRegistry.setProfile(result.AgentID, "改名", 5, time.Now()); err == nil {
+		t.Fatal("落盘失败时更新资料应返回错误")
+	}
 
 	// 内存态必须回滚: 不能出现"界面显示禁用成功, 重启后又是启用"
 	list, err := defaultRegistry.snapshot()
@@ -422,6 +556,9 @@ func TestMutate_PersistFailureRollsBack(t *testing.T) {
 	}
 	if len(list) != 1 || !list[0].Enabled {
 		t.Errorf("落盘失败后内存变更应回滚: %+v", list)
+	}
+	if list[0].Name == "改名" || list[0].Priority != 0 {
+		t.Errorf("落盘失败后节点资料变更应回滚: %+v", list[0])
 	}
 }
 
@@ -587,7 +724,7 @@ func TestRegistry_ConcurrentAccess(t *testing.T) {
 				case 1:
 					_, _ = defaultRegistry.touch(result.AgentID, heartbeatParams{LastIP: "10.0.0.1", ActiveStreams: j, Now: time.Now()})
 				case 2:
-					_, _ = defaultRegistry.schedule(time.Now(), 45*time.Second)
+					_, _ = defaultRegistry.schedule(time.Now(), 45*time.Second, config.ScheduleStrategyLeastActive)
 				default:
 					_, _ = defaultRegistry.snapshot()
 				}

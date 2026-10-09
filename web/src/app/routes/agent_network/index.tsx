@@ -136,6 +136,42 @@ export default function AgentNetwork() {
     }
   };
 
+  // 编辑节点资料(名称 + 优先级), 返回是否保存成功(供弹窗决定是否关闭)
+  const handleEdit = async (
+    agent: AgentView,
+    name: string,
+    priority: number,
+  ): Promise<boolean> => {
+    const secret = localStorage.getItem(LOCAL_STORAGE_KEY_API_SECRET);
+    if (!secret) {
+      toast.info("请先设置接口密钥");
+      return false;
+    }
+
+    setActingID(agent.id);
+    try {
+      const res = await postAdminAPI("/ge2o/agent-network/agents/edit", {
+        secret,
+        id: agent.id,
+        name,
+        priority,
+      });
+      if (!res.success) {
+        toast.warning(res.message);
+        return false;
+      }
+      toast.success(res.message);
+      await loadAgents();
+      return true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast.error(`更新节点资料异常: ${message}`);
+      return false;
+    } finally {
+      setActingID("");
+    }
+  };
+
   // 删除节点(需二次确认)
   const handleDelete = async () => {
     const target = deleteTarget;
@@ -257,6 +293,7 @@ export default function AgentNetwork() {
           actingID={actingID}
           onToggle={handleToggle}
           onDelete={setDeleteTarget}
+          onEdit={handleEdit}
         />
       ) : (
         <div className="space-y-2 rounded-xl border border-dashed px-6 py-16 text-center">

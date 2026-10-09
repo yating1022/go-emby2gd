@@ -44,6 +44,7 @@ func TestRules_AgentRoutesOrderedBeforeCatchAll(t *testing.T) {
 		"节点列表": constant.Route_AgentNetworkAgents,
 		"启停节点": constant.Route_AgentNetworkAgentsUpdate,
 		"删除节点": constant.Route_AgentNetworkAgentsDelete,
+		"编辑资料": constant.Route_AgentNetworkAgentsEdit,
 		"安装命令": constant.Route_AgentNetworkInstallCommand,
 	}
 	for name, pattern := range agentRules {
@@ -62,6 +63,7 @@ func TestRules_AgentRoutesOrderedBeforeCatchAll(t *testing.T) {
 	for name, pattern := range map[string]string{
 		"启停节点": constant.Route_AgentNetworkAgentsUpdate,
 		"删除节点": constant.Route_AgentNetworkAgentsDelete,
+		"编辑资料": constant.Route_AgentNetworkAgentsEdit,
 	} {
 		index := ruleIndex(pattern)
 		if index >= agents {
@@ -116,5 +118,31 @@ func TestGlobalDftHandler_InstallScriptHeadReachesRoute(t *testing.T) {
 	other := serveHead("/emby/Videos/123/stream")
 	if other.Code != http.StatusOK || other.Body.Len() != 0 {
 		t.Errorf("非安装脚本的 HEAD 请求仍应短路成空 200: code=%d body=%q", other.Code, other.Body.String())
+	}
+}
+
+// TestHandleWebStatic_WebRootRedirectsToTrailingSlash 裸 /ge2o/web 的尾斜杠归一化
+//
+// 前端 basename 是 "/ge2o/web/"(带尾斜杠), 裸 /ge2o/web 会落进 SPA 回落拿到
+// index.html, 但 React Router 因 basename 不匹配什么都不渲染(白屏)。
+// 因此服务端必须在 SPA 回落之前 301 到带尾斜杠形式(与 /ge2o 的既有重定向同款)。
+func TestHandleWebStatic_WebRootRedirectsToTrailingSlash(t *testing.T) {
+	oldConfig := config.C
+	config.C = &config.Config{Ge2o: &config.Ge2o{Web: &config.Web{Disable: false}}}
+	t.Cleanup(func() { config.C = oldConfig })
+
+	initRulePatterns()
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Any("/*vars", globalDftHandler)
+
+	// 带查询串请求: 重定向必须保留查询串
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, constant.Route_Web+"?a=1", nil))
+	if recorder.Code != http.StatusMovedPermanently {
+		t.Fatalf("GET %s HTTP = %d, want 301(不能落进 SPA 回落)", constant.Route_Web, recorder.Code)
+	}
+	if got, want := recorder.Header().Get("Location"), constant.Route_Web+"/?a=1"; got != want {
+		t.Errorf("Location = %q, want %q", got, want)
 	}
 }

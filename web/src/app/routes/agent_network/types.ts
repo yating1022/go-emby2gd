@@ -8,6 +8,8 @@ export type AgentView = {
   machine_id: string;
   enabled: boolean;
   online: boolean;
+  /** 调度优先级: 数字越小越优先, 0 = 默认(最优先) */
+  priority: number;
   version: string;
   /** RFC3339 UTC 时间串, 从未心跳时为空串 */
   last_seen_at: string;

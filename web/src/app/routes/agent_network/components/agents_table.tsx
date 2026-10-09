@@ -1,4 +1,16 @@
+import { useState } from "react";
+import { toast } from "sonner";
 import { Button } from "~/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "~/components/ui/dialog";
+import { Field, FieldGroup, FieldLabel } from "~/components/ui/field";
+import { Input } from "~/components/ui/input";
 import { Spinner } from "~/components/ui/spinner";
 import type { AgentView } from "../types";
 
@@ -8,6 +20,8 @@ type Props = {
   actingID: string;
   onToggle: (agent: AgentView) => void;
   onDelete: (agent: AgentView) => void;
+  /** 保存节点资料(名称 + 优先级); 返回 true 表示保存成功(弹窗据此关闭) */
+  onEdit: (agent: AgentView, name: string, priority: number) => Promise<boolean>;
 };
 
 /** 节点列表表格 */
@@ -16,92 +30,206 @@ export default function AgentsTable({
   actingID,
   onToggle,
   onDelete,
+  onEdit,
 }: Props) {
+  // 编辑弹窗: 打开时用节点当前值预填
+  const [editTarget, setEditTarget] = useState<AgentView | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editPriority, setEditPriority] = useState("0");
+  const [saving, setSaving] = useState(false);
+
+  const openEditDialog = (agent: AgentView) => {
+    setEditTarget(agent);
+    setEditName(agent.name);
+    setEditPriority(String(agent.priority));
+  };
+
+  const handleSaveEdit = async () => {
+    const target = editTarget;
+    if (!target) {
+      return;
+    }
+
+    // 数字框可能被清空或输入非整数: 本地先拦一次, 避免把 null 发给后端
+    const priority = Number(editPriority);
+    if (
+      !editPriority.trim() ||
+      !Number.isInteger(priority) ||
+      priority < 0 ||
+      priority > 9999
+    ) {
+      toast.error("优先级必须是 0-9999 的整数");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const ok = await onEdit(target, editName.trim(), priority);
+      if (ok) {
+        setEditTarget(null);
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
-    <div className="w-full overflow-hidden rounded-xl bg-card text-card-foreground shadow-xs ring-1 ring-foreground/10">
-      <div className="w-full overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b">
-              {[
-                "名称",
-                "状态",
-                "版本",
-                "活跃流",
-                "最近心跳",
-                "地址",
-                "ID",
-                "操作",
-              ].map((title) => (
-                <th
-                  key={title}
-                  className="h-10 px-4 text-left align-middle font-medium whitespace-nowrap"
-                >
-                  {title}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {agents.map((agent) => {
-              const acting = actingID === agent.id;
-              return (
-                <tr
-                  key={agent.id}
-                  className="border-b last:border-0 hover:bg-muted/50"
-                >
-                  <td className="px-4 py-2.5 align-middle whitespace-nowrap">
-                    {agent.name || "-"}
-                  </td>
-                  <td className="px-4 py-2.5 align-middle whitespace-nowrap">
-                    <AgentStatus agent={agent} />
-                  </td>
-                  <td className="px-4 py-2.5 align-middle whitespace-nowrap">
-                    {agent.version || "-"}
-                  </td>
-                  <td className="px-4 py-2.5 align-middle whitespace-nowrap">
-                    {agent.active_streams}
-                  </td>
-                  <td className="px-4 py-2.5 align-middle whitespace-nowrap">
-                    {formatTime(agent.last_seen_at)}
-                  </td>
-                  <td
-                    className="max-w-[16rem] truncate px-4 py-2.5 align-middle"
-                    title={agent.address || undefined}
+    <>
+      <div className="w-full overflow-hidden rounded-xl bg-card text-card-foreground shadow-xs ring-1 ring-foreground/10">
+        <div className="w-full overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b">
+                {[
+                  "名称",
+                  "状态",
+                  "优先级",
+                  "版本",
+                  "活跃流",
+                  "最近心跳",
+                  "地址",
+                  "ID",
+                  "操作",
+                ].map((title) => (
+                  <th
+                    key={title}
+                    className="h-10 px-4 text-left align-middle font-medium whitespace-nowrap"
                   >
-                    {agent.address || "-"}
-                  </td>
-                  <td className="px-4 py-2.5 align-middle whitespace-nowrap font-mono text-xs text-muted-foreground">
-                    {agent.id}
-                  </td>
-                  <td className="px-4 py-2.5 align-middle whitespace-nowrap">
-                    <div className="flex items-center gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={acting}
-                        onClick={() => onToggle(agent)}
-                      >
-                        {acting && <Spinner data-icon="inline-start" />}
-                        {agent.enabled ? "禁用" : "启用"}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        disabled={acting}
-                        onClick={() => onDelete(agent)}
-                      >
-                        删除
-                      </Button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+                    {title}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {agents.map((agent) => {
+                const acting = actingID === agent.id;
+                return (
+                  <tr
+                    key={agent.id}
+                    className="border-b last:border-0 hover:bg-muted/50"
+                  >
+                    <td className="px-4 py-2.5 align-middle whitespace-nowrap">
+                      {agent.name || "-"}
+                    </td>
+                    <td className="px-4 py-2.5 align-middle whitespace-nowrap">
+                      <AgentStatus agent={agent} />
+                    </td>
+                    <td className="px-4 py-2.5 align-middle whitespace-nowrap">
+                      {agent.priority}
+                    </td>
+                    <td className="px-4 py-2.5 align-middle whitespace-nowrap">
+                      {agent.version || "-"}
+                    </td>
+                    <td className="px-4 py-2.5 align-middle whitespace-nowrap">
+                      {agent.active_streams}
+                    </td>
+                    <td className="px-4 py-2.5 align-middle whitespace-nowrap">
+                      {formatTime(agent.last_seen_at)}
+                    </td>
+                    <td
+                      className="max-w-[16rem] truncate px-4 py-2.5 align-middle"
+                      title={agent.address || undefined}
+                    >
+                      {agent.address || "-"}
+                    </td>
+                    <td className="px-4 py-2.5 align-middle whitespace-nowrap font-mono text-xs text-muted-foreground">
+                      {agent.id}
+                    </td>
+                    <td className="px-4 py-2.5 align-middle whitespace-nowrap">
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={acting}
+                          onClick={() => openEditDialog(agent)}
+                        >
+                          编辑
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={acting}
+                          onClick={() => onToggle(agent)}
+                        >
+                          {acting && <Spinner data-icon="inline-start" />}
+                          {agent.enabled ? "禁用" : "启用"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          disabled={acting}
+                          onClick={() => onDelete(agent)}
+                        >
+                          删除
+                        </Button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
-    </div>
+
+      {/* 编辑资料弹窗(名称 + 优先级) */}
+      <Dialog
+        open={editTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !saving) {
+            setEditTarget(null);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>编辑节点</DialogTitle>
+            <DialogDescription>
+              名称与调度优先级一起保存。优先级数字越小越优先（0
+              为默认值），仅在「优先级」调度策略下生效。
+            </DialogDescription>
+          </DialogHeader>
+
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="agent-edit-name">名称</FieldLabel>
+              <Input
+                id="agent-edit-name"
+                value={editName}
+                maxLength={64}
+                placeholder="节点名称(最多 64 字符)"
+                onChange={(e) => setEditName(e.target.value)}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="agent-edit-priority">优先级</FieldLabel>
+              <Input
+                id="agent-edit-priority"
+                type="number"
+                min={0}
+                max={9999}
+                value={editPriority}
+                onChange={(e) => setEditPriority(e.target.value)}
+              />
+            </Field>
+          </FieldGroup>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={saving}
+              onClick={() => setEditTarget(null)}
+            >
+              取 消
+            </Button>
+            <Button disabled={saving} onClick={handleSaveEdit}>
+              {saving && <Spinner data-icon="inline-start" />}
+              {saving ? "保存中..." : "保 存"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 

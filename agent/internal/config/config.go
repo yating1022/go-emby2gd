@@ -5,7 +5,8 @@
 // 因此**写入权限固定 0600**；读取侧不做权限校验（属主可能是 systemd 的服务用户）。
 //
 // 同名环境变量优先于文件（测试与调试用）：MASTER_URL / AGENT_ID / AGENT_SECRET /
-// SIGN_KEY / LISTEN_PORT / PUBLIC_BASE_URL / MAX_CONCURRENT。
+// SIGN_KEY / LISTEN_PORT / PUBLIC_BASE_URL / MAX_CONCURRENT /
+// CACHE_BUDGET_MB / CACHE_MAX_AGE_MINUTES / PREFETCH_HEAD_MB / PREFETCH_TAIL_MB。
 //
 // `MAX_CONCURRENT` 兼容冻结稿 的称呼 `AGENT_MAX_CONCURRENT`——**文件与
 // 环境变量两种位置都认**（只认环境变量会让"按冻结稿 写进配置文件"变成一个
@@ -28,6 +29,17 @@ const (
 	DefaultListenPort = 8790
 	// DefaultMaxConcurrent 是并发流上限（冻结稿 §2.4 的 AGENT_MAX_CONCURRENT）。
 	DefaultMaxConcurrent = 32
+	// DefaultCacheBudgetMB 是读前缓存的内存预算（MiB）；0 = 关闭。
+	// 单文件首触预取固定约 36MiB（头 32 + 尾 4），256MiB 约容 7 部片的头尾。
+	DefaultCacheBudgetMB = 256
+	// DefaultCacheMaxAgeMinutes 是缓存块的最大可服务年龄（分钟）；0 = 不做年龄检查。
+	// 24 小时：角色是 LRU 之外的第二道兜底——真实 Google 直链没有 ETag/Last-Modified，
+	// 内容身份退化到总字节数，识破不了"同大小替换"，靠年龄防止陈旧字节被无限期服务。
+	DefaultCacheMaxAgeMinutes = 1440
+	// DefaultPrefetchHeadMB 是首触预取的头部长度（MiB）；0 = 不预取。
+	DefaultPrefetchHeadMB = 32
+	// DefaultPrefetchTailMB 是首触预取的尾部长度（MiB）；0 = 不预取尾部。
+	DefaultPrefetchTailMB = 4
 )
 
 // Config 是 serve 运行所需的全部配置。
@@ -39,6 +51,17 @@ type Config struct {
 	ListenPort    int
 	PublicBaseURL string // 可空：为空时 master 按源 IP 推导（冻结稿 §4.2）
 	MaxConcurrent int
+
+	// CacheBudgetMB 是读前缓存的内存预算（MiB）；0 = 关闭，
+	// 此时数据面行为与不带缓存的版本逐字节一致。
+	CacheBudgetMB int
+	// CacheMaxAgeMinutes 是缓存块的最大可服务年龄（分钟）；0 = 不做年龄检查。
+	// 超过它的块一律按 miss 处理（缓存开/关仍逐字节一致，只是少了本地命中）。
+	CacheMaxAgeMinutes int
+	// PrefetchHeadMB / PrefetchTailMB 是首触预取的头/尾长度（MiB）。
+	// 头为 0 即不预取（尾预取依赖头响应解析文件长度）。
+	PrefetchHeadMB int
+	PrefetchTailMB int
 }
 
 // Load 读取配置文件并叠加同名环境变量。
@@ -50,8 +73,12 @@ func Load(path string) (Config, error) {
 		path = DefaultPath
 	}
 	cfg := Config{
-		ListenPort:    DefaultListenPort,
-		MaxConcurrent: DefaultMaxConcurrent,
+		ListenPort:         DefaultListenPort,
+		MaxConcurrent:      DefaultMaxConcurrent,
+		CacheBudgetMB:      DefaultCacheBudgetMB,
+		CacheMaxAgeMinutes: DefaultCacheMaxAgeMinutes,
+		PrefetchHeadMB:     DefaultPrefetchHeadMB,
+		PrefetchTailMB:     DefaultPrefetchTailMB,
 	}
 	data, err := os.ReadFile(path)
 	switch {
@@ -102,6 +129,19 @@ func (c Config) Validate() error {
 	}
 	if c.MaxConcurrent <= 0 {
 		return fmt.Errorf("MAX_CONCURRENT 取值不合法：%d", c.MaxConcurrent)
+	}
+	// 0 是合法且常用的取值（关闭缓存 / 不预取）；负数只可能是手抖或改错了键。
+	if c.CacheBudgetMB < 0 {
+		return fmt.Errorf("CACHE_BUDGET_MB 取值不合法：%d（0 = 关闭读前缓存）", c.CacheBudgetMB)
+	}
+	if c.CacheMaxAgeMinutes < 0 {
+		return fmt.Errorf("CACHE_MAX_AGE_MINUTES 取值不合法：%d（0 = 不做年龄检查）", c.CacheMaxAgeMinutes)
+	}
+	if c.PrefetchHeadMB < 0 {
+		return fmt.Errorf("PREFETCH_HEAD_MB 取值不合法：%d（0 = 不预取头部）", c.PrefetchHeadMB)
+	}
+	if c.PrefetchTailMB < 0 {
+		return fmt.Errorf("PREFETCH_TAIL_MB 取值不合法：%d（0 = 不预取尾部）", c.PrefetchTailMB)
 	}
 	return nil
 }
@@ -159,6 +199,11 @@ func (c Config) marshal() string {
 	writeKV("LISTEN_PORT", strconv.Itoa(c.ListenPort))
 	writeKV("PUBLIC_BASE_URL", c.PublicBaseURL)
 	writeKV("MAX_CONCURRENT", strconv.Itoa(c.MaxConcurrent))
+	// 读前缓存四键：enroll 会写进默认值（管理员照着头改即可），删掉某行则回落默认。
+	writeKV("CACHE_BUDGET_MB", strconv.Itoa(c.CacheBudgetMB))
+	writeKV("CACHE_MAX_AGE_MINUTES", strconv.Itoa(c.CacheMaxAgeMinutes))
+	writeKV("PREFETCH_HEAD_MB", strconv.Itoa(c.PrefetchHeadMB))
+	writeKV("PREFETCH_TAIL_MB", strconv.Itoa(c.PrefetchTailMB))
 	return b.String()
 }
 
@@ -203,11 +248,18 @@ func applyValues(cfg *Config, values map[string]string) {
 	set("AGENT_SECRET", &cfg.AgentSecret)
 	set("SIGN_KEY", &cfg.SignKey)
 	set("PUBLIC_BASE_URL", &cfg.PublicBaseURL)
-	if v, ok := values["LISTEN_PORT"]; ok {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.ListenPort = n
+	setInt := func(key string, dst *int) {
+		if v, ok := values[key]; ok {
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+				*dst = n
+			}
 		}
 	}
+	setInt("LISTEN_PORT", &cfg.ListenPort)
+	setInt("CACHE_BUDGET_MB", &cfg.CacheBudgetMB)
+	setInt("CACHE_MAX_AGE_MINUTES", &cfg.CacheMaxAgeMinutes)
+	setInt("PREFETCH_HEAD_MB", &cfg.PrefetchHeadMB)
+	setInt("PREFETCH_TAIL_MB", &cfg.PrefetchTailMB)
 	// MAX_CONCURRENT 为准；AGENT_MAX_CONCURRENT 是冻结稿 的称呼（与 applyEnv
 	// 同一套优先级，避免"文件里写了却静默忽略"）。
 	for _, key := range []string{"MAX_CONCURRENT", "AGENT_MAX_CONCURRENT"} {
@@ -233,11 +285,18 @@ func applyEnv(cfg *Config) {
 	override("AGENT_SECRET", &cfg.AgentSecret)
 	override("SIGN_KEY", &cfg.SignKey)
 	override("PUBLIC_BASE_URL", &cfg.PublicBaseURL)
-	if v := strings.TrimSpace(os.Getenv("LISTEN_PORT")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.ListenPort = n
+	overrideInt := func(key string, dst *int) {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				*dst = n
+			}
 		}
 	}
+	overrideInt("LISTEN_PORT", &cfg.ListenPort)
+	overrideInt("CACHE_BUDGET_MB", &cfg.CacheBudgetMB)
+	overrideInt("CACHE_MAX_AGE_MINUTES", &cfg.CacheMaxAgeMinutes)
+	overrideInt("PREFETCH_HEAD_MB", &cfg.PrefetchHeadMB)
+	overrideInt("PREFETCH_TAIL_MB", &cfg.PrefetchTailMB)
 	// MAX_CONCURRENT 优先；兼容冻结稿 的 AGENT_MAX_CONCURRENT 称呼。
 	for _, key := range []string{"MAX_CONCURRENT", "AGENT_MAX_CONCURRENT"} {
 		if v := strings.TrimSpace(os.Getenv(key)); v != "" {

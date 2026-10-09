@@ -128,7 +128,7 @@ func TestEndToEndEnrollHeartbeatLinkAndRangeProxy(t *testing.T) {
 		t.Fatalf("SIGN_KEY 解码失败：%v", err)
 	}
 
-	// --- ② 数据面接线（与 main.go 的 runServe 一致） ---
+	// --- ② 数据面接线（与 main.go 的 runServe 一致，含读前缓存与首触预取） ---
 	var enabled atomic.Bool
 	enabled.Store(true)
 	links := proxy.NewLinkSource(proxy.LinkSourceConfig{
@@ -138,11 +138,25 @@ func TestEndToEndEnrollHeartbeatLinkAndRangeProxy(t *testing.T) {
 		Logger:    quietLogger(),
 		Enabled:   enabled.Load,
 	})
+	client := proxy.NewUpstreamClient()
+	cache := proxy.NewBlockCacheWithMaxAge(
+		int64(cfg.CacheBudgetMB)<<20, time.Duration(cfg.CacheMaxAgeMinutes)*time.Minute)
+	prefetcher := proxy.NewPrefetcher(proxy.PrefetcherConfig{
+		Cache:     cache,
+		Links:     links,
+		Client:    client,
+		Logger:    quietLogger(),
+		HeadBytes: int64(cfg.PrefetchHeadMB) << 20,
+		TailBytes: int64(cfg.PrefetchTailMB) << 20,
+	})
 	handler := proxy.NewHandler(proxy.Config{
 		SignKey:       signKey,
 		MaxConcurrent: 4,
 		Links:         links,
 		Logger:        quietLogger(),
+		Client:        client,
+		Cache:         cache,
+		Prefetch:      prefetcher,
 	})
 	agent := httptest.NewServer(handler)
 	defer agent.Close()

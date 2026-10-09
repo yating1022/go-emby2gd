@@ -1,9 +1,11 @@
 package agentnet
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/constant"
@@ -41,6 +43,28 @@ type adminDeleteRequest struct {
 	ID string `json:"id"`
 }
 
+// adminEditRequest 更新节点资料(名称与优先级)
+//
+// 全量资料更新: 两个字段一起提交、一起校验、一起生效 ——
+// priority 的零值 0 本身就是合法值(默认/最优先), 不存在"字段缺省"歧义。
+type adminEditRequest struct {
+	Secret string `json:"secret"`
+	// ID 节点 id
+	ID string `json:"id"`
+	// Name 节点展示名(1-64 字符)
+	Name string `json:"name"`
+	// Priority 调度优先级(0-9999, 越小越优先)
+	Priority int `json:"priority"`
+}
+
+// 节点资料的取值范围
+const (
+	// agentNameMaxRunes 节点名称的最大字符数(按字符而不是字节计, 避免中文名被误判过长)
+	agentNameMaxRunes = 64
+	// agentPriorityMax 节点优先级的上限(下限为 0)
+	agentPriorityMax = 9999
+)
+
 // agentView 管理接口返回的节点视图
 //
 // 与 agentRecord 的差别就是【脱敏】: 绝不包含 secret / sign_key 与
@@ -51,6 +75,7 @@ type agentView struct {
 	MachineID     string `json:"machine_id"`
 	Enabled       bool   `json:"enabled"`
 	Online        bool   `json:"online"`
+	Priority      int    `json:"priority"`
 	Version       string `json:"version"`
 	LastSeenAt    string `json:"last_seen_at"`
 	LastIP        string `json:"last_ip"`
@@ -141,6 +166,62 @@ func AdminUpdateAgent(c *gin.Context) {
 	c.JSON(http.StatusOK, model.Response{Success: true, Message: "更新成功"})
 }
 
+// AdminEditAgent 更新节点资料(名称与优先级)
+//
+// 全量资料更新: 名称与优先级一起提交、一起校验、一起生效。
+// 名称属于管理员状态: 节点重跑安装脚本(幂等重注册)不会覆盖它。
+func AdminEditAgent(c *gin.Context) {
+	if !agentNetworkConfig().IsEnabled() {
+		c.JSON(http.StatusOK, model.Response{Message: "agent 网络未启用, 请先在配置文件中开启 agent-network.enable"})
+		return
+	}
+
+	var req adminEditRequest
+	if !bindAdminRequest(c, &req) {
+		return
+	}
+	if !checkAdminSecret(c, req.Secret) {
+		return
+	}
+
+	id := strings.TrimSpace(req.ID)
+	if id == "" {
+		c.JSON(http.StatusOK, model.Response{Message: "缺少节点 id"})
+		return
+	}
+
+	// 名称按字符(rune)计数: 中文名不应该被字节长度误伤
+	name := strings.TrimSpace(req.Name)
+	switch {
+	case name == "":
+		c.JSON(http.StatusOK, model.Response{Message: "节点名称不能为空"})
+		return
+	case utf8.RuneCountInString(name) > agentNameMaxRunes:
+		c.JSON(http.StatusOK, model.Response{Message: fmt.Sprintf("节点名称过长(最多 %d 字符)", agentNameMaxRunes)})
+		return
+	}
+
+	// 0 本身是合法值(未设置 = 最优先), 只拒绝越界
+	if req.Priority < 0 || req.Priority > agentPriorityMax {
+		c.JSON(http.StatusOK, model.Response{Message: fmt.Sprintf("优先级必须是 0-%d 的整数", agentPriorityMax)})
+		return
+	}
+
+	rec, err := defaultRegistry.setProfile(id, name, req.Priority, time.Now())
+	if err != nil {
+		if err == errAgentNotFound {
+			c.JSON(http.StatusOK, model.Response{Message: "节点不存在"})
+			return
+		}
+		logs.Error("[agent 网络] 更新节点资料失败: %v", err)
+		c.JSON(http.StatusOK, model.Response{Message: "更新节点资料失败: " + err.Error()})
+		return
+	}
+
+	logf(colors.Blue, "节点资料更新: %s(%s), 优先级: %d", rec.Name, rec.ID, rec.Priority)
+	c.JSON(http.StatusOK, model.Response{Success: true, Message: "更新成功"})
+}
+
 // AdminDeleteAgent 删除节点
 //
 // 删除即吊销: 节点记录里的 secret 与 sign_key 一起消失,
@@ -224,6 +305,7 @@ func newAgentView(rec *agentRecord, now time.Time, offline time.Duration) agentV
 		MachineID:     rec.MachineID,
 		Enabled:       rec.Enabled,
 		Online:        online,
+		Priority:      rec.Priority,
 		Version:       rec.Version,
 		LastSeenAt:    formatViewTime(rec.LastSeenAt),
 		LastIP:        rec.LastIP,

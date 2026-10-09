@@ -87,7 +87,7 @@ func TestAdminListAgents_Desensitized(t *testing.T) {
 			t.Fatalf("节点视图不是对象: %v", item)
 		}
 		for _, key := range []string{
-			"id", "name", "machine_id", "enabled", "online", "version", "last_seen_at",
+			"id", "name", "machine_id", "enabled", "online", "priority", "version", "last_seen_at",
 			"last_ip", "active_streams", "public_base_url", "address", "listen_port",
 			"created_at", "updated_at",
 		} {
@@ -113,6 +113,9 @@ func TestAdminListAgents_Desensitized(t *testing.T) {
 	}
 	if offline["enabled"] != true {
 		t.Errorf("新注册节点应默认启用: %v", offline["enabled"])
+	}
+	if offline["priority"] != float64(0) {
+		t.Errorf("新注册节点的优先级应默认为 0: %v", offline["priority"])
 	}
 	if addr, _ := offline["address"].(string); !strings.HasPrefix(addr, "http://") {
 		t.Errorf("address 应由来源 IP 推导, 实际 %q", addr)
@@ -154,6 +157,7 @@ func TestAdmin_SecretAndStateRejections(t *testing.T) {
 		"/ge2o/agent-network/agents",
 		"/ge2o/agent-network/agents/update",
 		"/ge2o/agent-network/agents/delete",
+		"/ge2o/agent-network/agents/edit",
 		"/ge2o/agent-network/install-command",
 	}
 	for _, target := range targets {
@@ -205,6 +209,7 @@ func TestAdmin_DisabledMessages(t *testing.T) {
 		"/ge2o/agent-network/agents",
 		"/ge2o/agent-network/agents/update",
 		"/ge2o/agent-network/agents/delete",
+		"/ge2o/agent-network/agents/edit",
 		"/ge2o/agent-network/install-command",
 	} {
 		resp := adminPost(t, engine, target, `{"secret":"`+testGe2oSecret+`"}`)
@@ -259,6 +264,84 @@ func TestAdminUpdate_TogglesEnabled(t *testing.T) {
 	// 缺少 id
 	if resp := adminPost(t, engine, "/ge2o/agent-network/agents/update", `{"secret":"`+testGe2oSecret+`"}`); resp["message"] != "缺少节点 id" {
 		t.Errorf("缺少 id 时应明确提示: %v", resp)
+	}
+}
+
+// TestAdminEditAgent_ProfileUpdate 节点资料更新(名称 + 优先级)的全部分支
+func TestAdminEditAgent_ProfileUpdate(t *testing.T) {
+	setupStateDir(t)
+	setupFullConfig(t, true, "")
+	simulateRestart()
+
+	engine := newTestEngine()
+	enrolled := enrollAgent(t, engine, "m-1")
+	agentID := enrolled["agent_id"].(string)
+
+	edit := func(id, name string, priority int) map[string]any {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"secret": testGe2oSecret, "id": id, "name": name, "priority": priority,
+		})
+		if err != nil {
+			t.Fatalf("序列化失败: %v", err)
+		}
+		return adminPost(t, engine, "/ge2o/agent-network/agents/edit", string(body))
+	}
+	view := func() map[string]any {
+		t.Helper()
+		agents := agentsOf(t, adminPost(t, engine, "/ge2o/agent-network/agents", `{"secret":"`+testGe2oSecret+`"}`))
+		if len(agents) != 1 {
+			t.Fatalf("节点数 = %d, want 1", len(agents))
+		}
+		return agents[0].(map[string]any)
+	}
+
+	// 名称两端空白被去除, 名称与优先级一起生效
+	if resp := edit(agentID, "  家人云  ", 7); resp["success"] != true {
+		t.Fatalf("更新节点资料失败: %v", resp)
+	}
+	if got := view(); got["name"] != "家人云" || got["priority"] != float64(7) {
+		t.Errorf("节点资料未生效: %v", got)
+	}
+
+	// 边界值: 0(默认, 最优先)与 9999(最大)都是合法值
+	if resp := edit(agentID, "家人云", 0); resp["success"] != true {
+		t.Errorf("优先级 0 应合法: %v", resp)
+	}
+	if resp := edit(agentID, "家人云", 9999); resp["success"] != true {
+		t.Errorf("优先级 9999 应合法: %v", resp)
+	}
+
+	// 名称按字符计数: 64 个中文字符合法, 65 个拒绝
+	if resp := edit(agentID, strings.Repeat("名", 64), 1); resp["success"] != true {
+		t.Errorf("64 字符的名称应合法: %v", resp)
+	}
+	if resp := edit(agentID, strings.Repeat("名", 65), 1); resp["message"] != "节点名称过长(最多 64 字符)" {
+		t.Errorf("65 字符的名称应被拒绝: %v", resp)
+	}
+	if resp := edit(agentID, "   ", 1); resp["message"] != "节点名称不能为空" {
+		t.Errorf("空白名称应被拒绝: %v", resp)
+	}
+
+	// 优先级越界
+	if resp := edit(agentID, "家人云", -1); resp["message"] != "优先级必须是 0-9999 的整数" {
+		t.Errorf("负数优先级应被拒绝: %v", resp)
+	}
+	if resp := edit(agentID, "家人云", 10000); resp["message"] != "优先级必须是 0-9999 的整数" {
+		t.Errorf("超上限优先级应被拒绝: %v", resp)
+	}
+
+	// 缺少 id / 节点不存在
+	if resp := edit("", "家人云", 1); resp["message"] != "缺少节点 id" {
+		t.Errorf("缺少 id 时应明确提示: %v", resp)
+	}
+	if resp := edit("no-such-agent", "家人云", 1); resp["message"] != "节点不存在" {
+		t.Errorf("不存在的节点应提示节点不存在: %v", resp)
+	}
+
+	// 校验失败的请求不得写入任何字段: 仍是最后一次成功提交的资料
+	if got := view(); got["name"] != strings.Repeat("名", 64) || got["priority"] != float64(1) {
+		t.Errorf("校验失败的请求不得写入节点资料: %v", got)
 	}
 }
 

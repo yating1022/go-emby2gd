@@ -447,14 +447,29 @@ func resolveItemInfo(c *gin.Context, routeType RouteType) (ItemInfo, error) {
 	}
 	itemInfo.MsInfo = msInfo
 
-	u, err := url.Parse(fmt.Sprintf("/Items/%s/PlaybackInfo", itemInfo.Id))
+	u, err := buildPlaybackInfoUri(itemInfo.Id, itemInfo.ApiKeyType, itemInfo.ApiKeyName, itemInfo.ApiKey, msInfo)
 	if err != nil {
-		return ItemInfo{}, fmt.Errorf("构建 PlaybackInfo uri 失败, err: %v", err)
+		return ItemInfo{}, err
+	}
+	itemInfo.PlaybackInfoUri = u
+
+	return itemInfo, nil
+}
+
+// buildPlaybackInfoUri 构造条目的 PlaybackInfo 查询 uri
+//
+// 固定按"只看媒体信息"的语义构造: reqformat=json、IsPlayback=false、
+// AutoOpenLiveStream=false —— 查询本身不会让 Emby 打开任何流(见网关预热 preheat.go,
+// 它也用同一个口构造 uri)。
+func buildPlaybackInfoUri(itemId string, apiKeyType ApiKeyType, apiKeyName, apiKey string, msInfo MsInfo) (string, error) {
+	u, err := url.Parse(fmt.Sprintf("/Items/%s/PlaybackInfo", itemId))
+	if err != nil {
+		return "", fmt.Errorf("构建 PlaybackInfo uri 失败, err: %v", err)
 	}
 	q := u.Query()
 	// 默认只携带 query 形式的 api key
-	if itemInfo.ApiKeyType == Query {
-		q.Set(itemInfo.ApiKeyName, itemInfo.ApiKey)
+	if apiKeyType == Query {
+		q.Set(apiKeyName, apiKey)
 	}
 	q.Set("reqformat", "json")
 	q.Set("IsPlayback", "false")
@@ -463,9 +478,7 @@ func resolveItemInfo(c *gin.Context, routeType RouteType) (ItemInfo, error) {
 		q.Set("MediaSourceId", msInfo.OriginId)
 	}
 	u.RawQuery = q.Encode()
-	itemInfo.PlaybackInfoUri = u.String()
-
-	return itemInfo, nil
+	return u.String(), nil
 }
 
 // getRequestMediaSourceId 尝试从请求参数或请求体中获取 MediaSourceId 信息

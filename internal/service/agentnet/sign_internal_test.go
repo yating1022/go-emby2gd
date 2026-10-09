@@ -12,6 +12,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
+
+	"gopkg.in/yaml.v3"
 )
 
 // 冻结的签名向量
@@ -302,6 +306,49 @@ func TestPickAndSign(t *testing.T) {
 		mac.Write([]byte("v1\n" + fileToken(masterSignGDPath) + "\n" + expiry))
 		if want := hex.EncodeToString(mac.Sum(nil)); sign != want {
 			t.Fatalf("节点私自篡改了签名:\n实际 %s\n期望 %s", sign, want)
+		}
+	})
+
+	t.Run("priority 策略经配置接线到选点", func(t *testing.T) {
+		// schedule-strategy 是 config 的私有字段, 只能像生产一样经 yaml 解析 + Init 填值。
+		// 本用例钉住 PickAndSign → schedule 的策略接线: 参数传错时选点会退回 least-active。
+		setupStateDir(t)
+		var parsed config.Config
+		raw := "agent-network:\n" +
+			"  enable: true\n" +
+			"  enroll-token: test-enroll-token-0123456789\n" +
+			"  schedule-strategy: priority\n"
+		if err := yaml.Unmarshal([]byte(raw), &parsed); err != nil {
+			t.Fatalf("解析 yaml 失败: %v", err)
+		}
+		if parsed.AgentNetwork == nil {
+			t.Fatal("yaml 解析后 agent-network 段为空")
+		}
+		if err := parsed.AgentNetwork.Init(); err != nil {
+			t.Fatalf("初始化配置失败: %v", err)
+		}
+		oldCfg := config.C
+		config.C = &config.Config{AgentNetwork: parsed.AgentNetwork}
+		t.Cleanup(func() { config.C = oldCfg })
+		simulateRestart()
+
+		now := time.Now()
+		// 高优先级节点很忙, 低优先级节点空闲: priority 策略必须忽略活跃流选中前者
+		seedRecord(t, &agentRecord{
+			MachineID: "busy-top", Name: "busy-top", LastIP: "10.0.0.1", ListenPort: 8790,
+			Enabled: true, LastSeenAt: now, ActiveStreams: 9,
+		})
+		seedRecord(t, &agentRecord{
+			MachineID: "idle-low", Name: "idle-low", LastIP: "10.0.0.2", ListenPort: 8790,
+			Enabled: true, LastSeenAt: now, ActiveStreams: 0, Priority: 5,
+		})
+
+		url, err := PickAndSign(masterSignGDPath)
+		if err != nil {
+			t.Fatalf("调度失败: %v", err)
+		}
+		if !strings.HasPrefix(url, "http://10.0.0.1:8790/dl/") {
+			t.Fatalf("配置的 priority 策略未接线到选点(应调度到高优先级节点 busy-top), 实际: %s", url)
 		}
 	})
 }

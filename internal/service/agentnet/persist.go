@@ -36,18 +36,21 @@ type agentsFile struct {
 //
 // 字段名固定 snake_case: 与协议风格一致, 且让这个文件对运维可读。
 type agentFileEntry struct {
-	ID            string    `json:"id"`
-	MachineID     string    `json:"machine_id"`
-	Name          string    `json:"name"`
-	Secret        string    `json:"secret"`
-	SignKey       string    `json:"sign_key"`
-	PublicBaseURL string    `json:"public_base_url"`
-	ListenPort    int       `json:"listen_port"`
-	Version       string    `json:"version"`
-	LastIP        string    `json:"last_ip"`
-	Enabled       bool      `json:"enabled"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID            string `json:"id"`
+	MachineID     string `json:"machine_id"`
+	Name          string `json:"name"`
+	Secret        string `json:"secret"`
+	SignKey       string `json:"sign_key"`
+	PublicBaseURL string `json:"public_base_url"`
+	ListenPort    int    `json:"listen_port"`
+	Version       string `json:"version"`
+	LastIP        string `json:"last_ip"`
+	// Priority 调度优先级(越小越优先); omitempty 与语义一致:
+	// 缺省值 0 就是"未设置 = 最优先", 旧文件没有该字段时也按 0 处理。
+	Priority  int       `json:"priority,omitempty"`
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // persistLocked 把当前注册表原子写入磁盘(同目录临时文件 + rename)

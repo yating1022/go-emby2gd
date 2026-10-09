@@ -55,6 +55,19 @@ func handleWebStatic(c *gin.Context) (ok bool) {
 		return true
 	}
 
+	// 裸 /ge2o/web(无尾斜杠)必须归一化到带尾斜杠形式:
+	// 前端 basename 是 "/ge2o/web/"(web/src/react-router.config.ts), URL 不以它
+	// 开头时 React Router 什么都不渲染(浏览器控制台报 basename mismatch, 白屏)。
+	// 该路径会落进下面的 SPA 回落被喂 index.html, 靠回落是修不好的 —— 必须在此 301。
+	if path == constant.Route_Web {
+		target := constant.Route_Web + "/"
+		if c.Request.URL.RawQuery != "" {
+			target += "?" + c.Request.URL.RawQuery
+		}
+		c.Redirect(http.StatusMovedPermanently, target)
+		return true
+	}
+
 	feFS, err := fs.Sub(web_static.EmbedFS, "dist")
 	if err != nil {
 		logs.Error("获取静态资源文件系统失败: %v", err)

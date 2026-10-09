@@ -17,7 +17,9 @@ type agentRecord struct {
 	ID string
 	// MachineID 幂等注册键(取自 /etc/machine-id, 退化为主机名)
 	MachineID string
-	// Name 展示名(注册时的 hostname)
+	// Name 展示名: 新建记录时取上报主机名, 之后由管理员在节点管理页维护
+	//
+	// 【落盘】, 幂等重注册(升级重跑安装脚本)不覆盖。
 	Name string
 	// Secret 心跳与直链拉取的 Bearer 凭据, 属敏感信息, 不得进日志
 	Secret string
@@ -40,6 +42,12 @@ type agentRecord struct {
 	//
 	// 【不落盘】: 与 LastSeenAt 同理, 属于易失的运行时状态。
 	ActiveStreams int
+	// Priority 调度优先级: 数字越小越优先
+	//
+	// 仅 priority 调度策略下参与选点(该策略完全忽略 ActiveStreams);
+	// 默认 0, 即"未设置 = 最优先"。由管理员在节点管理页设置, 【落盘】,
+	// 重注册(幂等复用)不得覆盖。
+	Priority int
 	// Enabled 是否允许被调度(管理员可禁用)
 	Enabled bool
 	// CreatedAt 首次注册时间
@@ -68,6 +76,7 @@ func (r *agentRecord) toFileEntry() agentFileEntry {
 		ListenPort:    r.ListenPort,
 		Version:       r.Version,
 		LastIP:        r.LastIP,
+		Priority:      r.Priority,
 		Enabled:       r.Enabled,
 		CreatedAt:     r.CreatedAt,
 		UpdatedAt:     r.UpdatedAt,
@@ -86,6 +95,7 @@ func agentRecordFromFileEntry(e agentFileEntry) *agentRecord {
 		ListenPort:    e.ListenPort,
 		Version:       e.Version,
 		LastIP:        e.LastIP,
+		Priority:      e.Priority,
 		Enabled:       e.Enabled,
 		CreatedAt:     e.CreatedAt,
 		UpdatedAt:     e.UpdatedAt,

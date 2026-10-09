@@ -99,10 +99,11 @@ func initRulePatterns() {
 
 		// agent 网络管理接口
 		//
-		// 顺序要求: /agents/update 与 /agents/delete 必须排在 /agents 之前
+		// 顺序要求: /agents/update、/agents/delete 与 /agents/edit 必须排在 /agents 之前
 		// (规则表是未锚定的子串匹配, 前缀规则会截胡更长的路径)
 		{constant.Route_AgentNetworkAgentsUpdate, agentnet.AdminUpdateAgent},
 		{constant.Route_AgentNetworkAgentsDelete, agentnet.AdminDeleteAgent},
+		{constant.Route_AgentNetworkAgentsEdit, agentnet.AdminEditAgent},
 		{constant.Route_AgentNetworkInstallCommand, agentnet.AdminInstallCommand},
 		{constant.Route_AgentNetworkAgents, agentnet.AdminListAgents},
 

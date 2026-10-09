@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量门与测试/构建前置条件"}
+{"file": ".trellis/tasks/10-09-agent-priority-scheduling/design.md", "reason": "契约一致性核对：两调度分支、配置解析、接口与前端逐字段对齐"}
+{"file": ".trellis/tasks/10-09-agent-priority-scheduling/prd.md", "reason": "验收核对：N1-N7 与 D1/D2 逐条 + 向后兼容 A2/A3"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "调度日志新增优先级信息时不引入凭据/敏感内容"}

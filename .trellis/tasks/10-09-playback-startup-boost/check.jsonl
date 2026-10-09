@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/agent-network.md", "reason": "上线验收时核对发布/升级契约与心跳版本一致性"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "验收口径（对照式验收、基线记录、禁 commit）"}

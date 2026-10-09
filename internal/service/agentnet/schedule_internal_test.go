@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
 )
 
 // seedRecord 直接往注册表里塞一条记录(绕过注册流程, 便于构造调度场景)
@@ -59,7 +61,7 @@ func TestSchedule_CandidateFiltering(t *testing.T) {
 		Enabled: true, LastSeenAt: now,
 	})
 
-	rec, err := defaultRegistry.schedule(now, 45*time.Second)
+	rec, err := defaultRegistry.schedule(now, 45*time.Second, config.ScheduleStrategyLeastActive)
 	if err != nil {
 		t.Fatalf("调度失败: %v", err)
 	}
@@ -80,7 +82,7 @@ func TestSchedule_OfflineBoundary(t *testing.T) {
 		Enabled: true, LastSeenAt: now.Add(-45 * time.Second),
 	})
 
-	if rec, err := defaultRegistry.schedule(now, 45*time.Second); err != nil || rec == nil {
+	if rec, err := defaultRegistry.schedule(now, 45*time.Second, config.ScheduleStrategyLeastActive); err != nil || rec == nil {
 		t.Fatalf("恰好落在窗口边界上的节点应仍可用: rec=%+v err=%v", rec, err)
 	}
 }
@@ -105,7 +107,7 @@ func TestSchedule_LeastActiveStreamsAndTieBreak(t *testing.T) {
 	})
 
 	for i := 0; i < 5; i++ {
-		rec, err := defaultRegistry.schedule(now, 45*time.Second)
+		rec, err := defaultRegistry.schedule(now, 45*time.Second, config.ScheduleStrategyLeastActive)
 		if err != nil {
 			t.Fatalf("调度失败: %v", err)
 		}
@@ -121,7 +123,7 @@ func TestSchedule_LeastActiveStreamsAndTieBreak(t *testing.T) {
 	})
 	seen := map[string]bool{}
 	for i := 0; i < 200; i++ {
-		rec, err := defaultRegistry.schedule(now, 45*time.Second)
+		rec, err := defaultRegistry.schedule(now, 45*time.Second, config.ScheduleStrategyLeastActive)
 		if err != nil {
 			t.Fatalf("调度失败: %v", err)
 		}
@@ -140,12 +142,191 @@ func TestSchedule_NoCandidates(t *testing.T) {
 	setupAgentConfig(t, true)
 	simulateRestart()
 
-	rec, err := defaultRegistry.schedule(time.Now(), 45*time.Second)
+	rec, err := defaultRegistry.schedule(time.Now(), 45*time.Second, config.ScheduleStrategyLeastActive)
 	if err != nil {
 		t.Fatalf("没有候选不应是错误: %v", err)
 	}
 	if rec != nil {
 		t.Fatalf("没有候选时应返回 nil, 实际: %+v", rec)
+	}
+}
+
+// TestSchedule_PriorityStrategy priority 策略: 优先级数字最小者胜出, 忽略活跃流
+//
+// 覆盖 N2/N3: 最高优先级的在线节点承接全部新播放, 哪怕它已很忙、
+// 其它节点完全空闲; 未设置优先级(0)的节点视为最优先。
+func TestSchedule_PriorityStrategy(t *testing.T) {
+	setupStateDir(t)
+	setupAgentConfig(t, true)
+	simulateRestart()
+
+	now := time.Now()
+	// 忙但优先级最高(未设置 = 0): 必须仍然由它承接
+	seedRecord(t, &agentRecord{
+		MachineID: "primary", Name: "primary", LastIP: "10.0.0.1", ListenPort: 8790,
+		Enabled: true, LastSeenAt: now, ActiveStreams: 9,
+	})
+	seedRecord(t, &agentRecord{
+		MachineID: "backup", Name: "backup", LastIP: "10.0.0.2", ListenPort: 8790,
+		Enabled: true, LastSeenAt: now, ActiveStreams: 0, Priority: 5,
+	})
+	seedRecord(t, &agentRecord{
+		MachineID: "spare", Name: "spare", LastIP: "10.0.0.3", ListenPort: 8790,
+		Enabled: true, LastSeenAt: now, ActiveStreams: 0, Priority: 9,
+	})
+
+	for i := 0; i < 200; i++ {
+		rec, err := defaultRegistry.schedule(now, 45*time.Second, config.ScheduleStrategyPriority)
+		if err != nil {
+			t.Fatalf("调度失败: %v", err)
+		}
+		if rec.MachineID != "primary" {
+			t.Fatalf("priority 策略应始终选中优先级最小的节点(忽略活跃流), 实际: %s(优先级 %d)",
+				rec.MachineID, rec.Priority)
+		}
+	}
+}
+
+// TestSchedule_PriorityTieBreak 同优先级平局: 在并列集合内随机
+func TestSchedule_PriorityTieBreak(t *testing.T) {
+	setupStateDir(t)
+	setupAgentConfig(t, true)
+	simulateRestart()
+
+	now := time.Now()
+	seedRecord(t, &agentRecord{
+		MachineID: "tie-a", Name: "tie-a", LastIP: "10.0.0.1", ListenPort: 8790,
+		Enabled: true, LastSeenAt: now, ActiveStreams: 0, Priority: 3,
+	})
+	seedRecord(t, &agentRecord{
+		MachineID: "tie-b", Name: "tie-b", LastIP: "10.0.0.2", ListenPort: 8790,
+		Enabled: true, LastSeenAt: now, ActiveStreams: 7, Priority: 3,
+	})
+	seedRecord(t, &agentRecord{
+		MachineID: "worse", Name: "worse", LastIP: "10.0.0.3", ListenPort: 8790,
+		Enabled: true, LastSeenAt: now, ActiveStreams: 0, Priority: 4,
+	})
+
+	seen := map[string]bool{}
+	for i := 0; i < 200; i++ {
+		rec, err := defaultRegistry.schedule(now, 45*time.Second, config.ScheduleStrategyPriority)
+		if err != nil {
+			t.Fatalf("调度失败: %v", err)
+		}
+		if rec.Priority != 3 {
+			t.Fatalf("平局随机不应越出并列集合(优先级 3): %+v", rec)
+		}
+		seen[rec.MachineID] = true
+	}
+	if !seen["tie-a"] || !seen["tie-b"] {
+		t.Errorf("同优先级节点都应有机会被选中(200 次抽样), 实际命中: %v", seen)
+	}
+}
+
+// TestSchedule_PriorityPushDownAndRecovery 心跳消失下推, 恢复回归
+//
+// 覆盖 N4/N5: 仅当高优先级节点的心跳超出 offline 窗口才顺位下推;
+// 心跳恢复后, 新播放重新回到最高优先级节点。
+func TestSchedule_PriorityPushDownAndRecovery(t *testing.T) {
+	setupStateDir(t)
+	setupAgentConfig(t, true)
+	simulateRestart()
+
+	now := time.Now()
+	primary := seedRecord(t, &agentRecord{
+		MachineID: "primary", Name: "primary", LastIP: "10.0.0.1", ListenPort: 8790,
+		Enabled: true, LastSeenAt: now, Priority: 0,
+	})
+	seedRecord(t, &agentRecord{
+		MachineID: "backup", Name: "backup", LastIP: "10.0.0.2", ListenPort: 8790,
+		Enabled: true, LastSeenAt: now, Priority: 1,
+	})
+
+	pick := func() string {
+		t.Helper()
+		rec, err := defaultRegistry.schedule(now, 45*time.Second, config.ScheduleStrategyPriority)
+		if err != nil {
+			t.Fatalf("调度失败: %v", err)
+		}
+		if rec == nil {
+			t.Fatal("应有可调度节点")
+		}
+		return rec.MachineID
+	}
+
+	if got := pick(); got != "primary" {
+		t.Fatalf("首选应为最高优先级节点, 实际: %s", got)
+	}
+
+	// 顶层节点心跳消失(超过 offline-seconds): 顺位下推到第二优先级
+	primary.LastSeenAt = now.Add(-46 * time.Second)
+	if got := pick(); got != "backup" {
+		t.Fatalf("高优先级节点心跳消失后应顺位下推, 实际: %s", got)
+	}
+
+	// 心跳恢复: 新播放重新回到最高优先级节点(已播会话不迁移)
+	primary.LastSeenAt = now
+	if got := pick(); got != "primary" {
+		t.Fatalf("高优先级节点恢复心跳后应重新被选中, 实际: %s", got)
+	}
+}
+
+// TestSchedule_PrioritySkipsDisabled 禁用节点在 priority 策略下不参与调度
+//
+// 覆盖 N7: 禁用与"心跳消失"是两回事 —— 禁用是管理员的决定, 永不出池。
+func TestSchedule_PrioritySkipsDisabled(t *testing.T) {
+	setupStateDir(t)
+	setupAgentConfig(t, true)
+	simulateRestart()
+
+	now := time.Now()
+	seedRecord(t, &agentRecord{
+		MachineID: "disabled-top", Name: "disabled-top", LastIP: "10.0.0.1", ListenPort: 8790,
+		Enabled: false, LastSeenAt: now, Priority: 0,
+	})
+	seedRecord(t, &agentRecord{
+		MachineID: "backup", Name: "backup", LastIP: "10.0.0.2", ListenPort: 8790,
+		Enabled: true, LastSeenAt: now, Priority: 7,
+	})
+
+	for i := 0; i < 20; i++ {
+		rec, err := defaultRegistry.schedule(now, 45*time.Second, config.ScheduleStrategyPriority)
+		if err != nil {
+			t.Fatalf("调度失败: %v", err)
+		}
+		if rec == nil || rec.MachineID != "backup" {
+			t.Fatalf("被禁用的节点不应参与调度, 实际: %+v", rec)
+		}
+	}
+}
+
+// TestSchedule_LeastActiveIgnoresPriority least-active 策略不读取优先级(回归)
+//
+// A3: 缺省策略下行为与历史一致 —— 优先级只是给 priority 策略用的字段,
+// 不能悄悄改变 least-active 的选点结果。
+func TestSchedule_LeastActiveIgnoresPriority(t *testing.T) {
+	setupStateDir(t)
+	setupAgentConfig(t, true)
+	simulateRestart()
+
+	now := time.Now()
+	seedRecord(t, &agentRecord{
+		MachineID: "busy-top", Name: "busy-top", LastIP: "10.0.0.1", ListenPort: 8790,
+		Enabled: true, LastSeenAt: now, ActiveStreams: 5, Priority: 0,
+	})
+	seedRecord(t, &agentRecord{
+		MachineID: "idle-low", Name: "idle-low", LastIP: "10.0.0.2", ListenPort: 8790,
+		Enabled: true, LastSeenAt: now, ActiveStreams: 1, Priority: 99,
+	})
+
+	for i := 0; i < 20; i++ {
+		rec, err := defaultRegistry.schedule(now, 45*time.Second, config.ScheduleStrategyLeastActive)
+		if err != nil {
+			t.Fatalf("调度失败: %v", err)
+		}
+		if rec == nil || rec.MachineID != "idle-low" {
+			t.Fatalf("least-active 应按活跃流选点, 忽略优先级, 实际: %+v", rec)
+		}
 	}
 }
 

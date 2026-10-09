@@ -188,11 +188,14 @@ func (r *registry) enroll(p enrollParams) (enrollResult, error) {
 		existingID, ok := r.byMachine[p.MachineID]
 		if ok {
 			// 幂等复用: 换新凭据, 清零运行时状态(待下一次心跳重新探测)
+			//
+			// Name 与 Priority 属于管理员状态, 【不随重注册覆盖】:
+			// 节点每次升级都要重跑安装脚本, 若在这里套用上报的主机名,
+			// 管理员设置的自定义名称与优先级会被一次次擦掉。
 			rec := r.records[existingID]
 			prev := rec.clone()
 			rec.Secret = secret
 			rec.SignKey = signKey
-			rec.Name = name
 			rec.PublicBaseURL = p.PublicBaseURL
 			rec.ListenPort = p.ListenPort
 			rec.Version = p.Version
@@ -219,9 +222,10 @@ func (r *registry) enroll(p enrollParams) (enrollResult, error) {
 			ListenPort:    p.ListenPort,
 			Version:       p.Version,
 			LastIP:        p.LastIP,
-			Enabled:       true,
-			CreatedAt:     now,
-			UpdatedAt:     now,
+			// Priority 保持零值: 0 = 未设置 = 最优先(管理员可在节点管理页调整)
+			Enabled:   true,
+			CreatedAt: now,
+			UpdatedAt: now,
 		}
 		r.records[id] = rec
 		r.byMachine[p.MachineID] = id
@@ -333,6 +337,37 @@ func (r *registry) setEnabled(id string, enabled bool, now time.Time) (*agentRec
 		}
 		prev := rec.clone()
 		rec.Enabled = enabled
+		rec.UpdatedAt = now
+		updated = rec.clone()
+		return func() { *rec = *prev }
+	})
+	if err != nil {
+		return nil, err
+	}
+	if updated == nil {
+		return nil, errAgentNotFound
+	}
+	return updated, nil
+}
+
+// setProfile 更新节点资料(名称与优先级)并落盘
+//
+// 名称与优先级一起提交、一起生效(管理接口做校验, 这里只负责一致性):
+// 一次 mutate + 一次落盘, 失败时内存回滚(仿 setEnabled 的 undo 模式)。
+func (r *registry) setProfile(id string, name string, priority int, now time.Time) (*agentRecord, error) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	var updated *agentRecord
+	err := r.mutate(func() func() {
+		rec, ok := r.records[id]
+		if !ok {
+			return nil
+		}
+		prev := rec.clone()
+		rec.Name = name
+		rec.Priority = priority
 		rec.UpdatedAt = now
 		updated = rec.clone()
 		return func() { *rec = *prev }

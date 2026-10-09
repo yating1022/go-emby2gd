@@ -67,4 +67,11 @@ func TestConfigExample_Loadable(t *testing.T) {
 	if !config.C.AgentNetwork.FallbackEnabled() {
 		t.Error("配置示例文件的 agent-network.fallback-to-local 应默认为 true")
 	}
+	if got := config.C.AgentNetwork.ScheduleStrategy(); got != config.ScheduleStrategyLeastActive {
+		t.Errorf("配置示例文件的 agent-network.schedule-strategy = %q, want %q",
+			got, config.ScheduleStrategyLeastActive)
+	}
+	if !config.C.AgentNetwork.PreheatEnabled() {
+		t.Error("配置示例文件的 agent-network.preheat-enable 应默认为 true")
+	}
 }

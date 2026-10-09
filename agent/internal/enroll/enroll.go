@@ -118,6 +118,12 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		ListenPort:    opts.ListenPort,
 		PublicBaseURL: strings.TrimRight(strings.TrimSpace(opts.PublicBaseURL), "/"),
 		MaxConcurrent: config.DefaultMaxConcurrent,
+		// 读前缓存四键写默认值（而不是留空）：配置文件里看得见，改起来有据可依；
+		// 删掉某一行则回落同名默认值（见 config.Load）。
+		CacheBudgetMB:      config.DefaultCacheBudgetMB,
+		CacheMaxAgeMinutes: config.DefaultCacheMaxAgeMinutes,
+		PrefetchHeadMB:     config.DefaultPrefetchHeadMB,
+		PrefetchTailMB:     config.DefaultPrefetchTailMB,
 	}
 	if err := config.Write(opts.ConfigPath, cfg); err != nil {
 		return Result{}, err

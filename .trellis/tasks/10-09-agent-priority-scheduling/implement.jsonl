@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/agent-network.md", "reason": "既有协议与调度/配置契约（§2.4/§3.6 将被本任务修订）——改动必须与其保持一致"}
+{"file": ".trellis/tasks/10-09-agent-priority-scheduling/design.md", "reason": "本任务技术设计：配置/字段/调度分派/接口/前端落点"}
+{"file": ".trellis/tasks/10-09-agent-priority-scheduling/prd.md", "reason": "需求 N1-N7 与已决 D1/D2、验收标准"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "agents.json 状态文件与原子写/向后兼容惯例（priority 落盘遵循）"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "路由常量/规则表与包落点惯例"}

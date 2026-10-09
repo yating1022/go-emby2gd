@@ -75,6 +75,7 @@ func newTestEngine() *gin.Engine {
 	engine.Any("/ge2o/agent-network/agents", AdminListAgents)
 	engine.Any("/ge2o/agent-network/agents/update", AdminUpdateAgent)
 	engine.Any("/ge2o/agent-network/agents/delete", AdminDeleteAgent)
+	engine.Any("/ge2o/agent-network/agents/edit", AdminEditAgent)
 	engine.Any("/ge2o/agent-network/install-command", AdminInstallCommand)
 	return engine
 }

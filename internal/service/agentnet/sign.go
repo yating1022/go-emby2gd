@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/util/logs/colors"
 )
 
@@ -93,7 +94,7 @@ func PickAndSign(gdPath string) (string, error) {
 	}
 
 	now := time.Now()
-	rec, err := defaultRegistry.schedule(now, time.Duration(cfg.OfflineSeconds)*time.Second)
+	rec, err := defaultRegistry.schedule(now, time.Duration(cfg.OfflineSeconds)*time.Second, cfg.ScheduleStrategy())
 	if err != nil {
 		return "", err
 	}
@@ -106,6 +107,12 @@ func PickAndSign(gdPath string) (string, error) {
 		return "", err
 	}
 
-	logf(colors.Green, "调度到节点: %s(%s), 活跃流: %d, 文件: %s", rec.Name, rec.ID, rec.ActiveStreams, gdPath)
+	// priority 策略下追加优先级数字: 活跃流照常打印, 便于对比两种策略的选点差异
+	if cfg.ScheduleStrategy() == config.ScheduleStrategyPriority {
+		logf(colors.Green, "调度到节点: %s(%s), 活跃流: %d, 优先级: %d, 文件: %s",
+			rec.Name, rec.ID, rec.ActiveStreams, rec.Priority, gdPath)
+	} else {
+		logf(colors.Green, "调度到节点: %s(%s), 活跃流: %d, 文件: %s", rec.Name, rec.ID, rec.ActiveStreams, gdPath)
+	}
 	return url, nil
 }

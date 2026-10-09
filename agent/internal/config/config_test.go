@@ -251,3 +251,143 @@ func TestSignKeyBytes(t *testing.T) {
 		t.Fatal("空 SIGN_KEY 应报错")
 	}
 }
+
+// --- 读前缓存三键 -------------------------------------------------------------
+
+func TestCacheKeysDefaultWhenAbsent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.env")
+	body := "MASTER_URL=http://m\nAGENT_ID=a\nAGENT_SECRET=s\nSIGN_KEY=k\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("准备配置失败：%v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load 失败：%v", err)
+	}
+	if cfg.CacheBudgetMB != DefaultCacheBudgetMB || cfg.CacheMaxAgeMinutes != DefaultCacheMaxAgeMinutes ||
+		cfg.PrefetchHeadMB != DefaultPrefetchHeadMB || cfg.PrefetchTailMB != DefaultPrefetchTailMB {
+		t.Fatalf("缺省时应回落默认值，实际 %+v", cfg)
+	}
+	if DefaultCacheBudgetMB != 256 || DefaultCacheMaxAgeMinutes != 1440 ||
+		DefaultPrefetchHeadMB != 32 || DefaultPrefetchTailMB != 4 {
+		t.Fatalf("默认值不符合设计：%d/%d/%d/%d",
+			DefaultCacheBudgetMB, DefaultCacheMaxAgeMinutes, DefaultPrefetchHeadMB, DefaultPrefetchTailMB)
+	}
+}
+
+func TestCacheKeysFromFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.env")
+	body := "MASTER_URL=http://m\nAGENT_ID=a\nAGENT_SECRET=s\nSIGN_KEY=k\n" +
+		"CACHE_BUDGET_MB=512\nCACHE_MAX_AGE_MINUTES=60\nPREFETCH_HEAD_MB=64\nPREFETCH_TAIL_MB=8\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("准备配置失败：%v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load 失败：%v", err)
+	}
+	if cfg.CacheBudgetMB != 512 || cfg.CacheMaxAgeMinutes != 60 || cfg.PrefetchHeadMB != 64 || cfg.PrefetchTailMB != 8 {
+		t.Fatalf("文件里的四键未生效：%+v", cfg)
+	}
+}
+
+func TestCacheKeysFromEnvOverrideFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.env")
+	body := "MASTER_URL=http://m\nAGENT_ID=a\nAGENT_SECRET=s\nSIGN_KEY=k\n" +
+		"CACHE_BUDGET_MB=512\nCACHE_MAX_AGE_MINUTES=60\nPREFETCH_HEAD_MB=64\nPREFETCH_TAIL_MB=8\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("准备配置失败：%v", err)
+	}
+	t.Setenv("CACHE_BUDGET_MB", "0")
+	t.Setenv("CACHE_MAX_AGE_MINUTES", "30")
+	t.Setenv("PREFETCH_HEAD_MB", "16")
+	t.Setenv("PREFETCH_TAIL_MB", "0")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load 失败：%v", err)
+	}
+	// 0 是合法取值（关闭），必须能与"未设置"区分开。
+	if cfg.CacheBudgetMB != 0 || cfg.CacheMaxAgeMinutes != 30 || cfg.PrefetchHeadMB != 16 || cfg.PrefetchTailMB != 0 {
+		t.Fatalf("环境变量应覆盖文件：%+v", cfg)
+	}
+}
+
+func TestCacheKeysRejectNegative(t *testing.T) {
+	for _, tc := range []struct {
+		key string
+	}{
+		{"CACHE_BUDGET_MB"},
+		{"CACHE_MAX_AGE_MINUTES"},
+		{"PREFETCH_HEAD_MB"},
+		{"PREFETCH_TAIL_MB"},
+	} {
+		path := filepath.Join(t.TempDir(), "config.env")
+		body := "MASTER_URL=http://m\nAGENT_ID=a\nAGENT_SECRET=s\nSIGN_KEY=k\n" + tc.key + "=-1\n"
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("准备配置失败：%v", err)
+		}
+		_, err := Load(path)
+		if err == nil {
+			t.Fatalf("%s=-1 应被拒绝", tc.key)
+		}
+		if !strings.Contains(err.Error(), tc.key) {
+			t.Fatalf("错误信息应点名 %s，实际：%v", tc.key, err)
+		}
+	}
+}
+
+// 非整数取值（如手写成 "512M"）：与既有键（LISTEN_PORT / MAX_CONCURRENT）的既定
+// 语义一致——忽略该行、保留默认，而不是静默取一个别的值或让 serve 起不来。
+// 能解析但非法的负值则必须拒绝（见 TestCacheKeysRejectNegative）。
+func TestCacheKeysIgnoreNonNumericValue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.env")
+	body := "MASTER_URL=http://m\nAGENT_ID=a\nAGENT_SECRET=s\nSIGN_KEY=k\n" +
+		"CACHE_BUDGET_MB=512M\nCACHE_MAX_AGE_MINUTES=1h\nPREFETCH_HEAD_MB=abc\nPREFETCH_TAIL_MB=4 \n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("准备配置失败：%v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load 失败：%v", err)
+	}
+	if cfg.CacheBudgetMB != DefaultCacheBudgetMB || cfg.CacheMaxAgeMinutes != DefaultCacheMaxAgeMinutes ||
+		cfg.PrefetchHeadMB != DefaultPrefetchHeadMB {
+		t.Fatalf("非法取值应回落默认：%+v", cfg)
+	}
+	if cfg.PrefetchTailMB != 4 {
+		t.Fatalf("合法取值（含尾随空白）应生效：%+v", cfg)
+	}
+}
+
+func TestWriteIncludesCacheKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.env")
+	cfg := Config{
+		MasterURL: "http://m", AgentID: "a", AgentSecret: "s", SignKey: "k",
+		ListenPort: 8790, MaxConcurrent: 32,
+		CacheBudgetMB: DefaultCacheBudgetMB, CacheMaxAgeMinutes: DefaultCacheMaxAgeMinutes,
+		PrefetchHeadMB: DefaultPrefetchHeadMB, PrefetchTailMB: DefaultPrefetchTailMB,
+	}
+	if err := Write(path, cfg); err != nil {
+		t.Fatalf("Write 失败：%v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读配置失败：%v", err)
+	}
+	for _, want := range []string{
+		"CACHE_BUDGET_MB=256", "CACHE_MAX_AGE_MINUTES=1440",
+		"PREFETCH_HEAD_MB=32", "PREFETCH_TAIL_MB=4",
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("config.env 应写出 %s（管理员照着改才不用翻文档）：\n%s", want, raw)
+		}
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load 失败：%v", err)
+	}
+	if got != cfg {
+		t.Fatalf("含缓存键的往返不一致：\n得到 %+v\n期望 %+v", got, cfg)
+	}
+}

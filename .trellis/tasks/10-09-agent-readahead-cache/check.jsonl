@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/agent-network.md", "reason": "核对协议零变更（端点/签名/状态码/头白名单）与 agent 规范（stdlib/日志/race）"}
+{"file": ".trellis/spec/backend/http-proxy.md", "reason": "核对纯本地/混合/透传三类服务路径的响应头与流式行为符合既有契约"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "核对 -race、对照测试与日志规范；字节一致性测试是否真正钉死"}

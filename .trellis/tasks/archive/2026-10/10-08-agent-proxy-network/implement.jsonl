@@ -1,0 +1,7 @@
+{"file": ".trellis/tasks/10-08-agent-proxy-network/design.md", "reason": "协议落点与差异设计的唯一技术依据（余量链/端点形状/状态文件/陷阱清单）"}
+{"file": ".trellis/tasks/10-08-agent-proxy-network/prd.md", "reason": "需求全集、验收标准与范围边界"}
+{"file": ".trellis/spec/backend/gdrive-panel.md", "reason": "直链链路既有契约（余量/无302/错误透传），ResolveTarget 与播放入口接入必须遵守"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "无库状态与内存模式惯例；agents.json 是首个写盘状态例外"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "新包落点、路由注册与依赖方向惯例"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "协议跨网关/agent 两侧，契约一致性须跨层核对"}
+{"file": ".trellis/tasks/10-08-agent-proxy-network/research/e2e-harness-plan.md", "reason": "E2E 矩阵的组件拆法与现成测试设施清单（§4 的落地勘察）"}

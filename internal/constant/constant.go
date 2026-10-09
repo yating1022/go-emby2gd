@@ -51,6 +51,11 @@ const (
 	// agent 节点安装脚本(脚本本身不含密钥, 无需鉴权)
 	Reg_InstallScript = `^/install\.sh($|\?)`
 
+	// Route_AgentHeartbeat 节点心跳路径(正则见 Reg_AgentHeartbeat)
+	//
+	// 单独留一个字面量常量: 请求日志要按它静音(心跳 15s 一次 × N 节点会把日志刷爆)。
+	Route_AgentHeartbeat = "/api/agent/heartbeat"
+
 	Reg_All = `.*`
 )
 
@@ -66,11 +71,12 @@ const (
 
 	// agent 代理网络管理接口(管理员, 沿用 /ge2o 惯例)
 	//
-	// 注意规则表的匹配顺序: /agents/update 与 /agents/delete 必须排在 /agents 之前
-	// (匹配是未锚定的子串查找, 否则会被前缀规则截胡)。
+	// 注意规则表的匹配顺序: /agents/update、/agents/delete 与 /agents/edit
+	// 必须排在 /agents 之前(匹配是未锚定的子串查找, 否则会被前缀规则截胡)。
 	Route_AgentNetworkAgents         = Route_SelfBase + "/agent-network/agents"
 	Route_AgentNetworkAgentsUpdate   = Route_SelfBase + "/agent-network/agents/update"
 	Route_AgentNetworkAgentsDelete   = Route_SelfBase + "/agent-network/agents/delete"
+	Route_AgentNetworkAgentsEdit     = Route_SelfBase + "/agent-network/agents/edit"
 	Route_AgentNetworkInstallCommand = Route_SelfBase + "/agent-network/install-command"
 )
 

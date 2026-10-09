@@ -1,0 +1,29 @@
+{
+  "id": "playback-startup-boost",
+  "name": "playback-startup-boost",
+  "title": "起播加速：agent 读前缓存 + 网关预热",
+  "description": "",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "fruits",
+  "assignee": "fruits",
+  "createdAt": "2026-10-09",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "10-09-agent-readahead-cache",
+    "10-09-gateway-preheat"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

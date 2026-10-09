@@ -37,9 +37,10 @@ Agent-facing (registered in the `rules` table before `Reg_All`):
 
 Admin (`/ge2o` conventions: POST JSON + body `secret` + `model.Response` envelope, always HTTP 200):
 `/ge2o/agent-network/agents` (list), `/agents/update` `{secret,id,enabled}`, `/agents/delete` `{secret,id}`,
-`/install-command` `{secret}` → `data:{command,master_url}`.
-**Route order**: `/agents/update` and `/agents/delete` must be registered **before** `/agents`
-(first match wins in the rule table).
+`/agents/edit` `{secret,id,name,priority}` (full profile update: name 1–64 runes, priority 0–9999,
+Chinese `message` on rejection), `/install-command` `{secret}` → `data:{command,master_url}`.
+**Route order**: `/agents/update`, `/agents/delete` and `/agents/edit` must be registered **before**
+`/agents` (first match wins in the rule table).
 
 ### 2.2 Go surface
 
@@ -48,7 +49,7 @@ Admin (`/ge2o` conventions: POST JSON + body `secret` + `model.Response` envelop
 func Init() error                                          // main.go startup; registry load, fail-fast
 func PickAndSign(gdPath string) (string, error)            // sentinels: ErrDisabled / ErrNoAgent
 func Enroll(c *gin.Context)                                // + Heartbeat / DownloadLink / InstallScript
-func AdminListAgents(c *gin.Context)                       // + AdminUpdateAgent / AdminDeleteAgent / AdminInstallCommand
+func AdminListAgents(c *gin.Context)                       // + AdminUpdateAgent / AdminDeleteAgent / AdminEditAgent / AdminInstallCommand
 
 // internal/service/gdrive — the 4th public function
 func ResolveTarget(ctx context.Context, gdPath string) (url string, headers map[string]string, expiresAt string, err error)
@@ -79,13 +80,20 @@ agent-network:
   offline-seconds: 45      # MUST be > heartbeat interval (15s); validated at Init
   url-ttl: 24h             # signed client URL TTL
   fallback-to-local: true  # explicit false ≠ absent (UnmarshalYAML distinguishes; same trick as strm max-concurrent-streams)
+  schedule-strategy: least-active  # least-active (default) | priority; invalid → startup error, independent of enable
 ```
+
+`UnmarshalYAML` decodes through an **explicit field list** (`plainAgentNetwork`): a new key missing
+from that list is silently dropped — keep it in sync (pinned by `config` tests).
 
 State file `<BasePath>/agent-network/agents.json` — **the project's only written state file** (the
 sanctioned exception in database-guidelines.md): 0600, same-dir temp+rename atomic, loaded at startup
 (`agentnet.Init()`), corrupt file = **startup failure** (fail-fast — silently rebuilding would strand
-every agent's rotated credentials). Written on enroll/rotate/enable/disable/delete only;
-`last_seen`/`active_streams` are volatile and stay in memory.
+every agent's rotated credentials). Written on enroll/rotate/enable/disable/delete/edit only;
+`last_seen`/`active_streams` are volatile and stay in memory. `name`/`priority` are persisted admin
+state: set at row creation (name = reported hostname, priority = 0) and by `/agents/edit`; a re-enroll
+of an existing row **never overwrites** them (`priority` uses `omitempty` — 0 = unset = default, and
+old files without the key load as 0).
 
 ## 3. Contracts
 
@@ -95,7 +103,9 @@ Request: `{enroll_token, machine_id, hostname, version, listen_port, public_base
 Idempotency key = `machine_id` (agent falls back to hostname when `/etc/machine-id` is unreadable).
 Re-enroll = reuse row + **rotate** `agent_secret`/`sign_key` + clear `last_seen` (so nothing is
 scheduled to a process still holding the old keys — that process gets 401 on heartbeat, backs off,
-and is replaced by systemd). Response (bare object): `{agent_id, agent_secret, sign_key,
+and is replaced by systemd) + refresh reported fields — but **`name` and `priority` are admin state
+and are never touched** (nodes re-run the install script on every upgrade; applying the reported
+hostname there would erase custom names). Response (bare object): `{agent_id, agent_secret, sign_key,
 heartbeat_interval_seconds: 15}`; secret/sign_key are 32 bytes → 64 hex. The response is written
 **only after the state-file write succeeds** (disk failure → 500; never a success response for
 unpersisted credentials).
@@ -158,12 +168,25 @@ level without re-reading gdrive-panel.md §3.1 and this chain.
 
 ### 3.6 Scheduling + address derivation
 
-Candidates = `enabled && now−last_seen ≤ offline-seconds && address derivable`; pick minimum
-`active_streams`, random tiebreak (math/rand — not security-relevant). Address = `public_base_url`
-(http/https only, trailing slash trimmed) else
+Candidates = `enabled && now−last_seen ≤ offline-seconds && address derivable` — **identical for both
+strategies** (disabled is permanent; a stale heartbeat drops the node from the pool, which is exactly
+how the next priority takes over; the next heartbeat puts it back). Selection by
+`agent-network.schedule-strategy` (math/rand tiebreak — not security-relevant):
+
+- `least-active` (**default**; absent config = byte-identical legacy behavior): minimum
+  `active_streams`, random tiebreak — load spreads across nodes;
+- `priority`: minimum `priority` (0 = unset = highest), random tiebreak, **`active_streams` ignored
+  entirely** — the best-priority online node takes every new playback, even when busy and other
+  nodes are idle, until its heartbeat stops. Recovery is automatic (no session migration: only *new*
+  playbacks are scheduled).
+
+`priority` is per-record admin state (0–9999, set via `/agents/edit`), persisted (`priority,omitempty`;
+old files → 0) and preserved across re-enroll — same as `name`. `active_streams` still comes from
+heartbeats only (≤15s stale — accepted scheduling precision; no real-time channel). No automatic
+eviction: offline nodes just stop being scheduled; the next heartbeat restores them.
+
+Address = `public_base_url` (http/https only, trailing slash trimmed) else
 `"http://" + net.JoinHostPort(last_ip, strconv.Itoa(listen_port))` (IPv6 gets brackets for free).
-`active_streams` comes from heartbeats only (≤15s stale — accepted scheduling precision; no real-time
-channel). No automatic eviction: offline nodes just stop being scheduled; the next heartbeat restores them.
 
 ### 3.7 Play entry (the only integration point)
 

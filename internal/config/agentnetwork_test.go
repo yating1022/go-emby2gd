@@ -86,6 +86,10 @@ func TestAgentNetworkInit_AbsentSection(t *testing.T) {
 	if !agent.FallbackEnabled() {
 		t.Error("缺省 agent-network 段时 fallback-to-local 应默认为 true")
 	}
+	if got := agent.ScheduleStrategy(); got != config.ScheduleStrategyLeastActive {
+		t.Errorf("缺省 agent-network 段时 schedule-strategy 应取默认值 %q, 实际: %q",
+			config.ScheduleStrategyLeastActive, got)
+	}
 }
 
 func TestAgentNetworkInit_TrimsFields(t *testing.T) {
@@ -122,6 +126,112 @@ func TestAgentNetworkInit_Defaults(t *testing.T) {
 	}
 	if !agent.FallbackEnabled() {
 		t.Error("fallback-to-local 缺省值应为 true")
+	}
+	if got := agent.ScheduleStrategy(); got != config.ScheduleStrategyLeastActive {
+		t.Errorf("schedule-strategy 缺省值 = %q, want %q", got, config.ScheduleStrategyLeastActive)
+	}
+}
+
+// TestAgentNetworkInit_PreheatEnable 预热开关的解析与缺省
+//
+// 本用例同时钉住 UnmarshalYAML 的显式字段清单:
+// preheat-enable 若漏加进 plainAgentNetwork, 会被静默丢弃 —— 用户在配置里
+// 明确写下的 false 不生效, 预热照常触发且没有任何报错。
+func TestAgentNetworkInit_PreheatEnable(t *testing.T) {
+	clearAgentEnrollTokenEnv(t)
+
+	cases := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"显式 false", agentNetworkConfigEnabled("  preheat-enable: false\n"), false},
+		{"显式 true", agentNetworkConfigEnabled("  preheat-enable: true\n"), true},
+		{"缺省取 true", agentNetworkConfigEnabled(""), true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			agent, err := loadAgentNetworkConfig(t, tc.raw)
+			if err != nil {
+				t.Fatalf("配置初始化返回错误: %v", err)
+			}
+			if got := agent.PreheatEnabled(); got != tc.want {
+				t.Errorf("PreheatEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAgentNetworkInit_ScheduleStrategy 调度策略的解析 / 缺省 / 校验
+//
+// 本用例同时钉住 UnmarshalYAML 的显式字段清单:
+// schedule-strategy 若漏加进 plainAgentNetwork, 会被静默丢弃而退回默认值。
+func TestAgentNetworkInit_ScheduleStrategy(t *testing.T) {
+	clearAgentEnrollTokenEnv(t)
+
+	cases := []struct {
+		name    string
+		raw     string
+		want    string
+		wantSub string
+	}{
+		{
+			"显式 priority",
+			agentNetworkConfigEnabled("  schedule-strategy: priority\n"),
+			config.ScheduleStrategyPriority,
+			"",
+		},
+		{
+			"显式 least-active",
+			agentNetworkConfigEnabled("  schedule-strategy: least-active\n"),
+			config.ScheduleStrategyLeastActive,
+			"",
+		},
+		{
+			"首尾空白被去除",
+			agentNetworkConfigEnabled("  schedule-strategy: \"  priority  \"\n"),
+			config.ScheduleStrategyPriority,
+			"",
+		},
+		{
+			"缺省取 least-active",
+			agentNetworkConfigEnabled(""),
+			config.ScheduleStrategyLeastActive,
+			"",
+		},
+		{
+			"未启用时的非法值同样报错",
+			"agent-network:\n  enable: false\n  schedule-strategy: random\n",
+			"",
+			"agent-network.schedule-strategy 配置错误",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			agent, err := loadAgentNetworkConfig(t, tc.raw)
+			if tc.wantSub != "" {
+				if err == nil {
+					t.Fatal("应返回配置错误, 实际为 nil")
+				}
+				if !strings.Contains(err.Error(), tc.wantSub) {
+					t.Errorf("错误消息 %q 应包含 %q", err.Error(), tc.wantSub)
+				}
+				// 错误消息必须列出全部合法值, 便于现场直接照抄
+				if !strings.Contains(err.Error(), config.ScheduleStrategyPriority) ||
+					!strings.Contains(err.Error(), config.ScheduleStrategyLeastActive) {
+					t.Errorf("错误消息应列出合法值, 实际: %q", err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("配置初始化返回错误: %v", err)
+			}
+			if got := agent.ScheduleStrategy(); got != tc.want {
+				t.Errorf("ScheduleStrategy() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -269,5 +379,11 @@ func TestAgentNetworkNilSafety(t *testing.T) {
 	}
 	if !agent.FallbackEnabled() {
 		t.Error("空配置对象应默认回退本机代理")
+	}
+	if got := agent.ScheduleStrategy(); got != config.ScheduleStrategyLeastActive {
+		t.Errorf("空配置对象的调度策略应回退到 %q, 实际 %q", config.ScheduleStrategyLeastActive, got)
+	}
+	if !agent.PreheatEnabled() {
+		t.Error("空配置对象应默认开启网关预热")
 	}
 }

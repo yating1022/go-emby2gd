@@ -108,6 +108,14 @@ func TestRunPostsEnrollAndWritesConfig(t *testing.T) {
 	if info2.MaxConcurrent != config.DefaultMaxConcurrent {
 		t.Fatalf("应写入默认并发上限：%d", info2.MaxConcurrent)
 	}
+	// 读前缓存四键也要写进 config.env：留空会让新版本静默退回"无缓存"，
+	// 管理员在文件里看得见默认值才有可能按需调整。
+	if info2.CacheBudgetMB != config.DefaultCacheBudgetMB ||
+		info2.CacheMaxAgeMinutes != config.DefaultCacheMaxAgeMinutes ||
+		info2.PrefetchHeadMB != config.DefaultPrefetchHeadMB ||
+		info2.PrefetchTailMB != config.DefaultPrefetchTailMB {
+		t.Fatalf("应写入读前缓存默认值：%+v", info2)
+	}
 	if result.Config.AgentID != "agent-uuid" {
 		t.Fatalf("返回值不对：%+v", result)
 	}
