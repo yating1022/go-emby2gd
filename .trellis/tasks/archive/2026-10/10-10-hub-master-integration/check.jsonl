@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/agent-network.md", "reason": "核对 role 扩展的兼容性与调度隔离（hub 永不入客户端候选）；链路参数不含签名泄露"}
+{"file": ".trellis/spec/backend/gdrive-panel.md", "reason": "核对预热解析未破坏直链换取既有语义与错误路径"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "核对测试有效性：回退链/去重/确定性断言不可自证；关闭开关时对照式回归"}

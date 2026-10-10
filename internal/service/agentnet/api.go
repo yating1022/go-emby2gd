@@ -68,6 +68,19 @@ func bearerToken(header string) string {
 	return strings.TrimSpace(header[len(prefix):])
 }
 
+// staleHint 解析换链请求里的"上游状态陈旧"提示(v0.4.2 N4)
+//
+// agent 侧固定发送 stale=1; 解析刻意宽松(除空串/"0"/"false" 外都算提示),
+// 避免以后 agent 换写法时 master 静默失聪 —— 提示的代价只是多一次同步预热,
+// 漏读的代价是 R1 要等 30 分钟接受标记自然过期。
+func staleHint(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "0", "false":
+		return false
+	}
+	return true
+}
+
 // enrollRequest 注册请求体
 //
 // 字段名与 agent 侧 internal/enroll 的请求结构逐字一致。
@@ -295,8 +308,14 @@ func DownloadLink(c *gin.Context) {
 	// 【hub 角色自身除外】: hub 换新链(直链约 1h 过期)走的正是本接口,
 	// 若把 hub 的请求也改写成 hub 自己的地址, hub 会拿到一个指回它自己的
 	// "上游"、永远换不到 Google 新链(自指死循环), 因此 hub 只拿真正的直链。
+	//
+	// stale=1 是 v2 hub 直连失败(连接级失败 / 409 not_warmed)后的换链提示
+	// (v0.4.2 N4): 接受标记此刻可能还在, 但那正是"hub 侧状态不可信"的信号,
+	// 强制重发一次 /warm 再应答 —— hub 重启丢内存的 409 由此现场自愈(R1),
+	// 停机场景则在重预热失败时回退 Google 直链(数秒内恢复播放)。
+	stale := staleHint(c.Query("stale"))
 	if rec.Role != RoleHub {
-		if hubURL, ok := hubUpstreamFor(c.Request.Context(), gdPath, url, headers); ok {
+		if hubURL, ok := hubUpstreamFor(c.Request.Context(), gdPath, url, headers, stale); ok {
 			logf(colors.Green, "已向节点 %s(%s) 下发 hub 上游: file_id=%s, 文件: %s",
 				rec.Name, rec.ID, driveFileIDFromDirectLink(url), gdPath)
 			c.JSON(http.StatusOK, gin.H{

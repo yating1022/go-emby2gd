@@ -84,4 +84,11 @@ func TestConfigExample_Loadable(t *testing.T) {
 	if got := config.C.AgentNetwork.HubWarmTimeout(); got != 3*time.Second {
 		t.Errorf("配置示例文件的 agent-network.hub-warm-timeout = %v, want 3s", got)
 	}
+	// hub 直连 v2 的回滚开关同样必须写进示例: 缺省值与显式 true 的结果一致,
+	// 只看 HubDirectV2Enabled 区分不出"示例漏写"——用指针非 nil 钉住键的存在.
+	if config.C.AgentNetwork.HubDirectV2 == nil {
+		t.Error("配置示例文件必须写出 agent-network.hub-direct-v2(默认 true 的秒级回滚开关)")
+	} else if !config.C.AgentNetwork.HubDirectV2Enabled() {
+		t.Error("配置示例文件的 agent-network.hub-direct-v2 应为 true")
+	}
 }

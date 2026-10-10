@@ -1,9 +1,9 @@
 {
-  "id": "cache-hub-center",
-  "name": "cache-hub-center",
-  "title": "大盘鸡缓存中心（hub）",
+  "id": "agent-hub-direct-v2",
+  "name": "agent-hub-direct-v2",
+  "title": "agent 直连大盘鸡（签名 URL v2，去稳态回访）",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -18,14 +18,8 @@
   "commit": null,
   "pr_url": null,
   "subtasks": [],
-  "children": [
-    "10-10-hub-agent-mode",
-    "10-10-hub-master-integration",
-    "10-10-hub-deploy-verify",
-    "10-10-hub-v041-fixes",
-    "10-10-agent-hub-direct-v2"
-  ],
-  "parent": null,
+  "children": [],
+  "parent": "10-10-cache-hub-center",
   "relatedFiles": [],
   "notes": "",
   "meta": {}

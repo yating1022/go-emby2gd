@@ -126,6 +126,19 @@ func (p *Prefetcher) clientActive(fileID string) bool {
 //
 // 不阻塞、不返回错误；不满足条件（缓存关闭、期块集齐全、并发已满）时直接返回。
 func (p *Prefetcher) MaybeStart(fileID string) {
+	p.maybeStart(fileID, nil)
+}
+
+// MaybeStartWithLink 与 MaybeStart 相同，但本轮预取直接使用给定的上游
+// （v2 hub 直连的签名路由），**不向 master 换链**——v2 的契约是"稳态零回访"
+// （N3）；本轮上游失效（连接失败 / 409 / 其它非 2xx）时只弃轮，数据面自己
+// 会用 stale 提示换链自愈，预取不做任何额外回访。
+func (p *Prefetcher) MaybeStartWithLink(fileID string, link Link) {
+	p.maybeStart(fileID, &link)
+}
+
+// maybeStart 是两种入口的公共实现；upstream 非空表示本轮使用它作为上游。
+func (p *Prefetcher) maybeStart(fileID string, upstream *Link) {
 	if p == nil || p.cfg.Cache == nil || !p.cfg.Cache.Enabled() || fileID == "" {
 		return
 	}
@@ -145,7 +158,7 @@ func (p *Prefetcher) MaybeStart(fileID string) {
 		return
 	}
 	p.inflight[fileID] = struct{}{}
-	go p.run(fileID)
+	go p.run(fileID, upstream)
 }
 
 // needsPrefetch 报告该文件的期望块集是否仍有缺失。
@@ -217,20 +230,24 @@ func cacheBlockPresent(c *BlockCache, fileID, identity string, size, idx int64) 
 
 // prefetchRun 是一轮预取的可变状态（只被单个 goroutine 持有）。
 type prefetchRun struct {
-	p        *Prefetcher
-	ctx      context.Context
-	fileID   string
-	link     Link
-	size     int64 // 文件总字节数；<= 0 表示未知
-	ident    string
-	started  time.Time
-	blocks   int   // 本轮已入缓存的块数
-	bytes    int64 // 本轮已入缓存的字节数
-	requests int   // 本轮已打开的上游流数
-	firstPut bool  // 是否已记过"首块就绪"
+	p      *Prefetcher
+	ctx    context.Context
+	fileID string
+	link   Link
+	// hubDirect 表示本轮上游来自 v2 签名 URL（hub 直连）：上游非 2xx 时不做
+	// master 换链（N3），直接交回调用方按"状态异常"弃轮。
+	hubDirect bool
+	size      int64 // 文件总字节数；<= 0 表示未知
+	ident     string
+	started   time.Time
+	blocks    int   // 本轮已入缓存的块数
+	bytes     int64 // 本轮已入缓存的字节数
+	requests  int   // 本轮已打开的上游流数
+	firstPut  bool  // 是否已记过"首块就绪"
 }
 
-func (p *Prefetcher) run(fileID string) {
+// run 跑一轮预取。upstream 非空表示本轮使用该上游（v2 hub 直连），不向 master 换链。
+func (p *Prefetcher) run(fileID string, upstream *Link) {
 	defer func() {
 		<-p.sem
 		p.mu.Lock()
@@ -241,12 +258,18 @@ func (p *Prefetcher) run(fileID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), prefetchTimeout)
 	defer cancel()
 
-	link, err := p.cfg.Links.Link(ctx, fileID)
-	if err != nil {
-		p.cfg.Logger.Warn("首触预取放弃：拿不到直链", "file_id", fileID, "error", err)
-		return
+	var link Link
+	if upstream != nil {
+		link = *upstream
+	} else {
+		got, err := p.cfg.Links.Link(ctx, fileID)
+		if err != nil {
+			p.cfg.Logger.Warn("首触预取放弃：拿不到直链", "file_id", fileID, "error", err)
+			return
+		}
+		link = got
 	}
-	run := &prefetchRun{p: p, ctx: ctx, fileID: fileID, link: link, started: time.Now()}
+	run := &prefetchRun{p: p, ctx: ctx, fileID: fileID, link: link, hubDirect: upstream != nil, started: time.Now()}
 	// 续取判据的种子：身份与总大小取自当前元数据（可能已被首个请求观测进缓存）。
 	// 没有它，缺失扫描会因身份为空把"缓存里已有块"误判成缺失，把续取退化成
 	// 从块 0 重拉（design §2.3：只抓缺失）。
@@ -576,6 +599,9 @@ func (r *prefetchRun) yieldToClients() bool {
 
 // request 发一次上游 Range 请求；401/403 时重拉直链重试一次（与数据面同一语义），
 // 成功后本轮后续流都用新直链接续，避免每次都撞一次 401。
+//
+// hubDirect（v2 hub 直连）时不做 master 换链：非 2xx（含 409 not_warmed）原样交回，
+// 由 fetchStream 按"上游状态异常"弃轮——数据面自己会用 stale 提示换链自愈（N3/N4）。
 func (r *prefetchRun) request(start, end int64) (*http.Response, error) {
 	header := fmt.Sprintf("bytes=%d-%d", start, end)
 	resp, err := r.do(header)
@@ -583,6 +609,9 @@ func (r *prefetchRun) request(start, end int64) (*http.Response, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
+		return resp, nil
+	}
+	if r.hubDirect {
 		return resp, nil
 	}
 	_ = resp.Body.Close()

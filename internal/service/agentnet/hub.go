@@ -473,6 +473,50 @@ func WarmFile(ctx context.Context, gdPath string) (bool, error) {
 	return true, nil
 }
 
+// hubDirectV2Target 判定本次播放能否按 v2(hub 直连)签发, 并给出 u / f
+//
+// 门槛(N2), 缺一即维持 v1:
+//   - 配置开关 agent-network.hub-direct-v2 开启(默认开; 关 = 全部签 v1, 秒级回滚);
+//   - hub 缓存中心接入生效(HubRoutingEnabled);
+//   - 选中节点的心跳版本 ≥ 0.4.2(滚动兼容: 旧 agent 用不了 v2 URL);
+//   - 该文件的 warm 已被**同一台健康 hub** 接受: 直链解析出的 Drive 文件 id 经
+//     PickHub 选出的就是"这台"——与 warm 时的选点共用同一份确定性逻辑。
+//
+// 直链解析走 gdrive 的进程内缓存(详情页浏览/预热已经换过一次, 命中即零额外网络);
+// 任何一步不满足都返回 ok=false, 调用方按现状签 v1 —— 判定失败绝不影响播放。
+func hubDirectV2Target(gdPath string, rec *agentRecord, now time.Time) (hubBase, driveFileID string, ok bool) {
+	if rec == nil {
+		return "", "", false
+	}
+	cfg := agentNetworkConfig()
+	if !cfg.HubDirectV2Enabled() || !HubRoutingEnabled() {
+		return "", "", false
+	}
+	if !agentSupportsHubDirectV2(rec.Version) {
+		return "", "", false
+	}
+
+	directURL, _, _, err := gdrive.ResolveTarget(context.Background(), gdPath)
+	if err != nil {
+		// 取不到直链不是错误路径: 本次维持 v1, 由既有播放链路正常回退
+		return "", "", false
+	}
+	fileID := driveFileIDFromDirectLink(directURL)
+	if fileID == "" {
+		return "", "", false
+	}
+	hub, err := PickHub(fileID)
+	if err != nil || hub == nil {
+		return "", "", false
+	}
+	if !hubWarmStore.isAccepted(fileID, hub.ID, now) {
+		// 未预热(或标记已过期): 维持 v1 —— 首播要走 master 的"同步补发预热"
+		// 语义, 不能把客户端直接指到一台还没准备好的 hub 上。
+		return "", "", false
+	}
+	return hub.BaseURL, fileID, true
+}
+
 // hubUpstreamFor 决策节点的上游是否改向 hub
 //
 // 返回 (hub 数据面地址, true) 表示本次下发给节点的上游应指向 hub;
@@ -481,7 +525,14 @@ func WarmFile(ctx context.Context, gdPath string) (bool, error) {
 //   - 该文件的 warm 已被这台 hub 接受 → 直接改写(不再打扰 hub 与面板);
 //   - 否则按"本次握手同步补发"处理: 短超时下发一次 /warm, 接受才改写,
 //     失败即回退(冷却窗口内的失败会直接跳过, 不阻塞起播)。
-func hubUpstreamFor(ctx context.Context, gdPath, directURL string, auth map[string]string) (string, bool) {
+//
+// stale=true 表示这次换链带"陈旧提示"(v0.4.2 N4): 节点在 hub 直连失败
+// (连接级失败 / 409 not_warmed)后回访 —— 此刻接受标记可能还有效, 但那正是
+// "hub 侧状态已经不可信"的信号(进程刚死/重启丢内存), 因此**跳过标记捷径、
+// 强制重发一次 /warm** 再应答: 指令成功就照旧指向 hub(现场重预热, R1 秒级
+// 自愈), 失败则回退 Google 直链(停机场景数秒内恢复播放)。
+// stale=false 时行为与 v0.4.1 逐字一致。
+func hubUpstreamFor(ctx context.Context, gdPath, directURL string, auth map[string]string, stale bool) (string, bool) {
 	cfg := agentNetworkConfig()
 	if !HubRoutingEnabled() {
 		return "", false
@@ -507,7 +558,7 @@ func hubUpstreamFor(ctx context.Context, gdPath, directURL string, auth map[stri
 	}
 
 	now := time.Now()
-	if !hubWarmStore.isAccepted(fileID, hub.ID, now) {
+	if stale || !hubWarmStore.isAccepted(fileID, hub.ID, now) {
 		payload := hubWarmRequest{
 			FileID:     fileID,
 			FileToken:  fileToken(gdPath),
@@ -521,6 +572,9 @@ func hubUpstreamFor(ctx context.Context, gdPath, directURL string, auth map[stri
 		if err := warmHub(ctx, hub, payload, cfg.HubWarmTimeout(), now); err != nil {
 			logf(colors.Yellow, "hub 预热未被接受, 本次直连 Google: %s", gdPath)
 			return "", false
+		}
+		if stale {
+			logf(colors.Green, "hub 陈旧换链: 已重新预热 file_id=%s, hub=%s(%s)", fileID, hub.Name, hub.ID)
 		}
 	}
 

@@ -148,7 +148,7 @@ func (s *LinkSource) Link(ctx context.Context, fileID string) (Link, error) {
 	s.inflight[fileID] = call
 	s.mu.Unlock()
 
-	link, err := s.fetch(ctx, fileID)
+	link, err := s.fetch(ctx, fileID, false)
 
 	s.mu.Lock()
 	delete(s.inflight, fileID)
@@ -164,10 +164,24 @@ func (s *LinkSource) Link(ctx context.Context, fileID string) (Link, error) {
 
 // Refresh 无条件重新拉取并覆盖缓存（上游 401/403 后的单次重试用，冻结稿 §2.3）。
 func (s *LinkSource) Refresh(ctx context.Context, fileID string) (Link, error) {
+	return s.refresh(ctx, fileID, false)
+}
+
+// RefreshStale 与 Refresh 相同，但请求里带 stale=1："hub 侧的状态可能已陈旧，
+// 请先重新确认再应答"（v0.4.2 N4 的换链提示，hub 直连失败时使用）。
+//
+// 语义边界：提示由 master 解释（收到它先同步重发一次 /warm 再应答）；请求与响应
+// 形状与普通换链完全一致，因此对不认识该参数的 master 天然兼容（多余参数被忽略）。
+func (s *LinkSource) RefreshStale(ctx context.Context, fileID string) (Link, error) {
+	return s.refresh(ctx, fileID, true)
+}
+
+// refresh 换链的公共实现。
+func (s *LinkSource) refresh(ctx context.Context, fileID string, stale bool) (Link, error) {
 	if err := s.checkEnabled(); err != nil {
 		return Link{}, err
 	}
-	link, err := s.fetch(ctx, fileID)
+	link, err := s.fetch(ctx, fileID, stale)
 	if err != nil {
 		return Link{}, err
 	}
@@ -220,12 +234,18 @@ type downloadLinkResponse struct {
 //
 // 请求用脱离调用方取消的 ctx：拉直链是单飞的共享动作，第一个客户端断开
 // 不应该把其他等待者一起打断；仍然受 FetchTimeout 约束。
-func (s *LinkSource) fetch(ctx context.Context, fileID string) (Link, error) {
+//
+// stale=true 时附加 stale=1：换链方的 hub 直连刚失败（连接级失败或 409），
+// 提示 master 先重新确认 hub 状态再应答（v0.4.2 N4）。
+func (s *LinkSource) fetch(ctx context.Context, fileID string, stale bool) (Link, error) {
 	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.FetchTimeout)
 	defer cancel()
 
 	var resp downloadLinkResponse
 	query := url.Values{"file_id": {fileID}}
+	if stale {
+		query.Set("stale", "1")
+	}
 	if err := s.client.GetJSON(fetchCtx, "/api/agent/download-link", query, &resp); err != nil {
 		if ctx.Err() != nil {
 			return Link{}, ctx.Err() // 调用方（客户端）已断开

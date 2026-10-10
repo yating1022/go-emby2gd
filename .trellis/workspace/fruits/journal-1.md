@@ -109,3 +109,42 @@ v0.3.2 全链闭环（发布/升级/真链复测 requests=2、探测 0.36s）；
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: hub 缓存中心全链上线（v0.4.0/v0.4.1）+ 真链演练与两处修复
+
+**Date**: 2026-10-10
+**Task**: hub 缓存中心全链上线（v0.4.0/v0.4.1）+ 真链演练与两处修复
+**Branch**: `main`
+
+### Summary
+
+Twon hub + master + 四节点全链上线并验证；演练修复回退换链与后缀区间；已交接用户手动播放测试
+
+### Main Changes
+
+## hub 缓存中心（大盘鸡）全链上线
+
+- v0.4.0 发布（hub 模式 + master 接入 + 安装脚本 --role）→ Twon 部署 hub（8791/白名单/48h+200G，缓存目录 gd-agent 属主预建）→ master hub-enable → 四节点升级。
+- 真链首批验证：Emby 钩子→hub 预热 **512ms 首块就绪**；NAS 探测（真实形态）TTFB 0.36–0.38s；节点→hub 命中 3–9ms；转全量 ~9MB/s；白名单 fail-closed 双端验证；重启后磁盘块复用。
+- 演练发现两缺陷 → v0.4.1 修复并重跑：①节点连接级失败（refused/DNS/RST）不换链 → hub 停机 502 至链接过期；现改为一换链一重试（实测 refused→master 415µs 换链→206，2.6s）；②`bytes=-N` 后缀全链拒绝 → 上游兜底 30s 卡死；现 hub 按 size 解析缓存供流（4ms 命中，节点零改动）。
+- R1 窗口（hub 重启后 ≤30min 未缓存区段 409）如实记录不修；观察项：48h TTL/LRU、Twon 流量、3 分钟规则真实浏览场景。
+- 五端全 v0.4.1；六任务归档（两实现 + v041 + 早前 v0.3.2 树）；spec §3.11/§3.12 补录冻结语义。
+- 交接：**用户手动播放测试**（手动过一遍：浏览→秒点播放、连续剧集、拖动）。
+
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

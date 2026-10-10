@@ -101,6 +101,15 @@ type AgentNetwork struct {
 	//
 	// 关闭时所有路径与未部署 hub 完全一致。
 	HubEnable bool `yaml:"hub-enable"`
+	// HubDirectV2 是否对支持 v2 的节点签发 hub 直连 URL(agent-network.hub-direct-v2), 默认开
+	//
+	// 开启且【节点心跳版本 ≥0.4.2 且该文件的 warm 已被同一台健康 hub 接受】时,
+	// 307 签发 v2 签名 URL(u=hub 内网基址, f=Drive 文件 id): 客户端 307 之后
+	// 节点直连 hub、稳态零回访 master; 其余情况一律维持 v1(现行为, 旧节点零感知)。
+	//
+	// 用指针区分"未配置"(nil, 取默认值 true)与"显式 false"; 关闭 = 全部签 v1,
+	// 是 v0.4.2 的秒级回滚路径(回滚只需改本项, 不必回装旧镜像)。
+	HubDirectV2 *bool `yaml:"hub-direct-v2"`
 
 	// scheduleStrategy 节点调度策略(agent-network.schedule-strategy)
 	//
@@ -138,6 +147,7 @@ func (a *AgentNetwork) UnmarshalYAML(value *yaml.Node) error {
 		PreheatEnable    *bool  `yaml:"preheat-enable"`
 		ScheduleStrategy string `yaml:"schedule-strategy"`
 		HubEnable        bool   `yaml:"hub-enable"`
+		HubDirectV2      *bool  `yaml:"hub-direct-v2"`
 		HubPort          int    `yaml:"hub-port"`
 		HubWarmTimeout   string `yaml:"hub-warm-timeout"`
 	}
@@ -154,6 +164,7 @@ func (a *AgentNetwork) UnmarshalYAML(value *yaml.Node) error {
 	a.PreheatEnable = v.PreheatEnable
 	a.scheduleStrategy = v.ScheduleStrategy
 	a.HubEnable = v.HubEnable
+	a.HubDirectV2 = v.HubDirectV2
 	a.hubPort = v.HubPort
 	a.hubWarmTimeoutRaw = v.HubWarmTimeout
 	if v.FallbackToLocal != nil {
@@ -308,6 +319,18 @@ func (a *AgentNetwork) HubEnabled() bool {
 		return false
 	}
 	return a.HubEnable
+}
+
+// HubDirectV2Enabled 获取是否对支持 v2 的节点签发 hub 直连 URL
+//
+// 配置对象为空或未配置该项时按默认值 true 处理: 门槛本身已把旧节点与
+// 未预热文件挡在 v2 之外, 默认开启才能让新链路生效; 只有显式配置
+// hub-direct-v2: false 才全部回退 v1(秒级回滚路径)。
+func (a *AgentNetwork) HubDirectV2Enabled() bool {
+	if a == nil || a.HubDirectV2 == nil {
+		return true
+	}
+	return *a.HubDirectV2
 }
 
 // HubPort 获取 hub 内网口的端口

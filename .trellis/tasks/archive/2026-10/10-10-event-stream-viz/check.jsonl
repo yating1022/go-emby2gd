@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/agent-network.md", "reason": "核对事件字段红线（无凭据/签名/URL）、开关语义、鉴权一致性"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "核对测试有效性（缓冲/批量/增量 seq 断言不可自证）与变异验证"}

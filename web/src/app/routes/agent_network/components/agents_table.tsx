@@ -38,6 +38,11 @@ export default function AgentsTable({
   const [editPriority, setEditPriority] = useState("0");
   const [saving, setSaving] = useState(false);
 
+  // 缓存中心(hub)排最前: 它与边缘节点职责完全不同, 列表里一眼可辨
+  const ordered = [...agents].sort(
+    (a, b) => (a.role === "hub" ? 0 : 1) - (b.role === "hub" ? 0 : 1),
+  );
+
   const openEditDialog = (agent: AgentView) => {
     setEditTarget(agent);
     setEditName(agent.name);
@@ -82,6 +87,7 @@ export default function AgentsTable({
               <tr className="border-b">
                 {[
                   "名称",
+                  "角色",
                   "状态",
                   "优先级",
                   "版本",
@@ -101,7 +107,7 @@ export default function AgentsTable({
               </tr>
             </thead>
             <tbody>
-              {agents.map((agent) => {
+              {ordered.map((agent) => {
                 const acting = actingID === agent.id;
                 return (
                   <tr
@@ -110,6 +116,9 @@ export default function AgentsTable({
                   >
                     <td className="px-4 py-2.5 align-middle whitespace-nowrap">
                       {agent.name || "-"}
+                    </td>
+                    <td className="px-4 py-2.5 align-middle whitespace-nowrap">
+                      <AgentRole role={agent.role} />
                     </td>
                     <td className="px-4 py-2.5 align-middle whitespace-nowrap">
                       <AgentStatus agent={agent} />
@@ -230,6 +239,28 @@ export default function AgentsTable({
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+/** 角色列: hub=缓存中心(唯一从 Google 拉流并缓存, 不参与客户端调度); 其余=边缘节点(面向客户端透传) */
+function AgentRole({ role }: { role: string }) {
+  if (role === "hub") {
+    return (
+      <span
+        className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-violet-500/15 text-violet-600 dark:text-violet-400"
+        title="缓存中心：唯一从 Google 拉流并缓存的机器，为边缘节点供流；不参与客户端调度"
+      >
+        缓存中心
+      </span>
+    );
+  }
+  return (
+    <span
+      className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-sky-500/15 text-sky-600 dark:text-sky-400"
+      title="边缘节点：面向客户端透传，上游走缓存中心"
+    >
+      边缘节点
+    </span>
   );
 }
 

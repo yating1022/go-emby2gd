@@ -153,6 +153,36 @@ verification is constant-time (`hmac.Equal`); failures collapse into one 403 tex
 exist on both sides; when touching the format, recompute them with an **independent** implementation
 (the e2e tests do — never with the function under test).
 
+**v2 — hub-direct target (added v0.4.2; v1 above untouched).** When the master wants the agent to
+stream from the cache hub **directly** (no master callback in the steady state), it signs a v2 URL:
+
+```
+http://<agent_base>/dl/<token>?e=<unix>&u=<QueryEscape(hubBase)>&f=<driveFileID>&s=<hex>
+s = HMAC-SHA256(sign_key, "v2\n<token>\n<e>\n<u>\n<f>")   # u/f are the DECODED values
+```
+
+- **`u`/`f` must be inside the signature** — outside it, any valid URL could be edited into an
+  arbitrary-file proxy against the hub (security red line; tamper matrix on both sides).
+- Frozen details: parameter order `e → u → f → s`; `u` is `url.QueryEscape`d (v6 literals appear as
+  `%5B…%5D`); `u` validation = http(s), host present, **no internal whitespace** (edges trimmed),
+  no userinfo/query/fragment; trailing `/` normalized for use only — the HMAC binds the raw value.
+  A v1 URL carrying `u`/`f` must fail verification.
+- **Dual gate (master, at 307):** v2 is signed only when **all** hold — `agent-network.hub-direct-v2`
+  (switch, default true; `false` ⇒ all v1, the second-level rollback), agent heartbeat version
+  ≥ 0.4.2 (unparseable ⇒ v1), live hub accept-marker for the file, healthy hub. Otherwise v1,
+  byte-identical to before. Note: a disabled-but-holding node no longer consults the master, so a
+  client with an unexpired v2 URL can keep playing up to `url-ttl` — accepted cost of zero-callback.
+- **Agent retry matrix:** v2 → exactly one link refresh + retry on 401 or **409** (the refresh
+  carries `stale=1`); connection-level failures also carry `stale=1` (otherwise the master re-serves
+  the same dead hub from its still-valid marker and the retry is a guaranteed 502). v1 unchanged:
+  401/403, no `stale`. Hub 403 (allowlist fail-closed) is **not** retried under v2 — the outcome is
+  identical either way; the retry would only waste one callback.
+- **`stale=1` semantics (master):** force a fresh `/warm` round (skip the marker shortcut) before
+  answering; re-warm failure falls back to Google direct under the usual cooldown. This is what
+  gives the hub-restart window (R1) its second-level self-heal.
+- Steady state incurs **zero master callbacks** (link-fetch count = 0; the agent's prefetch streams
+  from the signed hub target as well).
+
 ### 3.5 Cache margin chain (NEVER break)
 
 ```
@@ -424,7 +454,11 @@ key or signed URL may ever reach logs on either side.
   region-path 401 re-link + resume, disk cache TTL/LRU/crash-reuse/Pin, multi-dial bad-address
   skip + last-address grace, credential hygiene both directions. `hub-enable=false` ⇒
   byte-identical to baseline with a **connected** fake hub (a dead port proves nothing —
-  mutation-verified).
+  mutation-verified). v0.4.2: v2 frozen vectors recomputed independently on **both sides** (python
+  hmac) and pinned cross-repo, tamper matrix (u/f/host/port/swap), dual-gate matrix (switch ×
+  version × marker × health), steady-state **zero-callback counting** (fake master request counter
+  with a real hub data plane), stale re-warm request counts, v2=401/409 vs v1=401/403 wire
+  assertions.
 
 ## 7. Wrong vs Correct
 
@@ -517,4 +551,17 @@ for _, rec := range all { if rec.Role == RoleHub { continue } } // first line of
 
 ```go
 if rec.Role != RoleHub { u = hubUpstreamFor(...) } // hub keeps getting real Google links
+```
+
+#### Wrong — putting the hub target in unsigned query params
+
+```go
+// ?e=..&u=<hubBase>&f=<driveID>&s=HMAC("v1\n<token>\n<e>")
+// any holder of one valid URL could swap f to any file the hub can fetch — a free file proxy
+```
+
+#### Correct — the v2 message covers u and f
+
+```go
+// s = HMAC(key, "v2\n<token>\n<e>\n<u>\n<f>"); the agent verifies before trusting either
 ```

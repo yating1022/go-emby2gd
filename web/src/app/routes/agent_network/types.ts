@@ -5,6 +5,8 @@
 export type AgentView = {
   id: string;
   name: string;
+  /** 角色: "hub"=缓存中心(从 Google 拉流并缓存, 不参与客户端调度) / "node"=边缘节点(面向客户端透传) */
+  role: string;
   machine_id: string;
   enabled: boolean;
   online: boolean;

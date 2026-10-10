@@ -255,7 +255,8 @@ export default function AgentNetwork() {
         <div className="space-y-1">
           <h1 className="text-2xl font-bold">节点管理</h1>
           <p className="text-sm text-muted-foreground">
-            管理已接入的 agent 节点，或一键复制安装命令注册新节点
+            管理已接入的 agent
+            节点。「缓存中心」从 Google 拉流并缓存、给节点供流；「边缘节点」面向客户端透传。
           </p>
         </div>
         <div className="flex items-center gap-2">

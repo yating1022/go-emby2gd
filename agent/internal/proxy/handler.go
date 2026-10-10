@@ -113,16 +113,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	status := h.serve(rec, r, fileID)
 
-	// 请求日志：只记 file_id / 状态码 / 耗时 / Range。**不记**签名参数 `s`
-	// （签名是"能拉这个文件"的凭据，日志接口可被远程读取），
+	// 请求日志：只记 file_id / 状态码 / 耗时 / Range。**不记**签名参数 `s` 与
+	// v2 的 u/f（签名是"能拉这个文件"的凭据，日志接口可被远程读取），
 	// 也绝不记 master 下发的凭据头与 master 返回的 Google token。
-	h.log.Info("代理请求",
+	//
+	// hub_direct 只在 v2 请求上出现（true = 请求声明走 hub 直连路由）：
+	// 稳态播放的链路形态在日志里可一眼确认，v1 请求的日志行保持逐字不变。
+	fields := []any{
 		"method", r.Method,
 		"file_id", fileID,
 		"status", status,
 		"duration_ms", time.Since(start).Milliseconds(),
 		"range", r.Header.Get("Range"),
-	)
+	}
+	if query := r.URL.Query(); query.Get("u") != "" || query.Get("f") != "" {
+		fields = append(fields, "hub_direct", true)
+	}
+	h.log.Info("代理请求", fields...)
 }
 
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, fileID string) int {
@@ -139,7 +146,24 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, fileID string) i
 			"该路径不支持此请求方法", http.Header{"Allow": []string{"GET, HEAD"}})
 		return http.StatusMethodNotAllowed
 	}
-	if !Verify(h.cfg.SignKey, fileID, r.URL.Query().Get("e"), r.URL.Query().Get("s"), h.now()) {
+
+	// 验签：v1 与 v2 共存（N5）。u / f 任一出现即按 v2 处理——v1 消息里没有这两个
+	// 参数，"v2 参数 + v1 签名"没有任何合法来源，不给它留口子。
+	query := r.URL.Query()
+	expiry := query.Get("e")
+	sig := query.Get("s")
+	hubBaseRaw, driveFileID := query.Get("u"), query.Get("f")
+	hubDirect := hubBaseRaw != "" || driveFileID != ""
+	hubBase := ""
+	if hubDirect {
+		// 签名校验针对解码后的 u/f 原值；成功才把归一化后的 hub 基址带出来。
+		normalized, ok := VerifyV2(h.cfg.SignKey, fileID, expiry, hubBaseRaw, driveFileID, sig, h.now())
+		if !ok {
+			writeError(w, http.StatusForbidden, "AGENT_URL_FORBIDDEN", forbiddenText, nil)
+			return http.StatusForbidden
+		}
+		hubBase = normalized
+	} else if !Verify(h.cfg.SignKey, fileID, expiry, sig, h.now()) {
 		writeError(w, http.StatusForbidden, "AGENT_URL_FORBIDDEN", forbiddenText, nil)
 		return http.StatusForbidden
 	}
@@ -168,19 +192,34 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, fileID string) i
 
 	// 首触预取：该文件第一次被请求时异步把头部/尾部拉进缓存（内部判重与开关）。
 	// 异步且不返回错误——绝不影响本次请求的响应与耗时。
-	h.prefetch.MaybeStart(fileID)
+	//
+	// v2 hub 直连请求不在这里起：预取要向 master 换链，而 v2 的契约是"稳态零回访"
+	// （N3）——它改由下方拿到 link 后，用签名 URL 里的同一个 hub 上游启动预取。
+	if !hubDirect {
+		h.prefetch.MaybeStart(fileID)
+	}
 
 	ctx := r.Context()
-	link, err := h.cfg.Links.Link(ctx, fileID)
-	if err != nil {
-		return h.writeLinkError(w, fileID, err)
+
+	// 上游来源：v1 维持现状（向 master 换链）；v2 直接用签名 URL 里的 hub 路由，
+	// 稳态下 master 完全不参与（N3）。u/f 已过验签与形态校验，这里必然可用。
+	var link Link
+	if hubDirect {
+		link = hubDirectLink(hubBase, driveFileID, expiry)
+		h.prefetch.MaybeStartWithLink(fileID, link)
+	} else {
+		var err error
+		link, err = h.cfg.Links.Link(ctx, fileID)
+		if err != nil {
+			return h.writeLinkError(w, fileID, err)
+		}
 	}
 
 	// 读前缓存：只在能完整解析出单区间 `Range: bytes=<start>-<end?>` 的 GET 上启用；
 	// 其它形态（无 Range、后缀区间、多区间、HEAD）一律走现状。
 	if r.Method == http.MethodGet && h.cache.Enabled() {
 		if rng, ok := parseByteRange(r.Header.Get("Range")); ok {
-			if status, served := h.serveCached(w, r, fileID, rng, link); served {
+			if status, served := h.serveCached(w, r, fileID, rng, link, hubDirect); served {
 				return status
 			}
 		}
@@ -189,11 +228,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, fileID string) i
 	resp, err := h.doUpstream(ctx, r, link)
 	if err != nil && isConnectionError(err) {
 		// 连接级失败（v0.4.1 F1）：上游地址不可达（hub 停机 → connection refused 最典型），
-		// 旧直链原样重试必然同样失败；换链（master 据此回退直链或换 hub）才可能恢复。
+		// 旧链原样重试必然同样失败；换链（master 据此回退 Google 直链）才可能恢复。
 		// 复用 401/403 的同一条 Refresh 通道，仍只重试一次。
 		h.log.Warn("连接上游失败，重拉直链后重试一次",
 			"file_id", fileID, "error", upstreamErrorText(err))
-		refreshed, rerr := h.cfg.Links.Refresh(ctx, fileID)
+		refreshed, rerr := h.refreshForRetry(ctx, fileID, hubDirect)
 		if rerr != nil {
 			return h.writeLinkError(w, fileID, rerr)
 		}
@@ -205,12 +244,26 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, fileID string) i
 			fmt.Sprintf("连接上游失败：%v", err), nil)
 		return http.StatusBadGateway
 	}
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		// 直链可能已过期/被撤销：失效缓存重拉一次再试（冻结稿 §2.3 的单次重试）。
+	// 换链重试的触发条件（恰一次）：
+	//   v1(Google 直链): 401/403 —— 直链已过期/被撤销，冻结稿 §2.3 的语义，零变化；
+	//   v2(hub 直连):    401/409 —— hub 数据面的 409 = not_warmed（v0.4.1 冻结语义），
+	//                    hub 重启/停机后由此现场自愈（N4: 换链请求附带 stale=1）。
+	shouldRetry := resp.StatusCode == http.StatusUnauthorized
+	if hubDirect {
+		shouldRetry = shouldRetry || resp.StatusCode == http.StatusConflict
+	} else {
+		shouldRetry = shouldRetry || resp.StatusCode == http.StatusForbidden
+	}
+	if shouldRetry {
 		_ = resp.Body.Close()
-		h.log.Warn("上游返回错误，重拉直链后重试一次",
-			"file_id", fileID, "upstream_status", resp.StatusCode)
-		refreshed, rerr := h.cfg.Links.Refresh(ctx, fileID)
+		if hubDirect {
+			h.log.Warn("hub 报告区段未预热，带 stale 提示换链后重试一次",
+				"file_id", fileID, "upstream_status", resp.StatusCode)
+		} else {
+			h.log.Warn("上游返回错误，重拉直链后重试一次",
+				"file_id", fileID, "upstream_status", resp.StatusCode)
+		}
+		refreshed, rerr := h.refreshForRetry(ctx, fileID, hubDirect)
 		if rerr != nil {
 			return h.writeLinkError(w, fileID, rerr)
 		}
@@ -260,6 +313,37 @@ func (h *Handler) doUpstream(ctx context.Context, r *http.Request, link Link) (*
 		return nil, err
 	}
 	return h.client.Do(req)
+}
+
+// hubDirectLink 由**已验签**的 v2 参数构造 hub 直连上游（v0.4.2 N3）。
+//
+// 上游地址 = {u}/f/{PathEscape(f)}，与 master 侧 hubFileURL 的拼法一致；
+// 不带任何请求头——hub 数据面在内网白名单内明文服务，不需要 Google 凭据。
+// ExpiresAt 取签名 URL 的 e（只作信息字段：直连上游不参与链接缓存）。
+func hubDirectLink(hubBase, driveFileID, expiry string) Link {
+	expiresAt := time.Time{}
+	if sec, err := strconv.ParseInt(expiry, 10, 64); err == nil {
+		expiresAt = time.Unix(sec, 0)
+	}
+	return Link{
+		URL:       hubBase + "/f/" + url.PathEscape(driveFileID),
+		Headers:   map[string]string{},
+		ExpiresAt: expiresAt,
+	}
+}
+
+// refreshForRetry 为"恰一次重试"换一条新链接。
+//
+//   - v1 直链：沿用现状（不带任何提示，冻结稿 §2.3）；
+//   - v2 hub 直连：换链请求附加 stale=1（N4）——连接级失败与 409 not_warmed 都说明
+//     hub 侧状态可能已陈旧，带提示 master 才会先重新确认（同步重发 /warm）再应答，
+//     否则"hub 刚宕但心跳未过期"时 master 会把同一台死 hub 再答一遍，回退要等
+//     offline 窗口（数十秒）才发生。恰一次重试的次数语义不变。
+func (h *Handler) refreshForRetry(ctx context.Context, fileID string, hubDirect bool) (Link, error) {
+	if hubDirect {
+		return h.cfg.Links.RefreshStale(ctx, fileID)
+	}
+	return h.cfg.Links.Refresh(ctx, fileID)
 }
 
 // isConnectionError 判定上游请求错误是否属于"连接级失败"：请求根本没有得到任何
@@ -325,7 +409,10 @@ const maxCachePrefixBytes = 32 << 20
 //	           只保留给这条路径）。
 //
 // 只有"能完整解析出 bytes=<start>-<end?>、长度已知且身份可判"的请求才会走到这里。
-func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, fileID string, rng byteRange, link Link) (int, bool) {
+//
+// hubDirect 报告本请求的上游是否来自 v2 签名 URL（hub 直连）：只影响失败后的
+// 换链策略（见 refreshForRetry），v1 请求的缓存行为零变化。
+func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, fileID string, rng byteRange, link Link, hubDirect bool) (int, bool) {
 	meta, ok := h.cache.Meta(fileID)
 	if !ok || meta.size <= 0 {
 		return 0, false
@@ -396,7 +483,7 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, fileID str
 		// 已写出无法回退，但重试成功就能把余段补齐，长播放不再因 hub 抖动中断。
 		h.log.Warn("混合服务：连接上游失败，重拉直链后重试一次",
 			"file_id", fileID, "error", upstreamErrorText(err))
-		refreshed, rerr := h.cfg.Links.Refresh(r.Context(), fileID)
+		refreshed, rerr := h.refreshForRetry(r.Context(), fileID, hubDirect)
 		if rerr != nil {
 			return h.abortMixed(fileID, "混合服务：重拉直链失败，断开连接（前缀已写出，无法回退）",
 				"error", rerr)
@@ -407,17 +494,26 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, fileID str
 		return h.abortMixed(fileID, "混合服务：上游请求失败，断开连接（前缀已写出，无法回退）",
 			"error", err)
 	}
-	// 直链可能已过期/被撤销：与透传路径（serve）和预取（prefetch.go request）**同一
-	// 语义**——失效缓存重拉一次再试（冻结稿 §2.3；gdrive-panel.md 的 Google 401 行）。
+	// 换链重试信号（与 serve 的透传路径同源）：
+	//   v1(Google 直链): 401/403 —— 直链可能已过期/被撤销，失效缓存重拉一次再试
+	//                    （冻结稿 §2.3；gdrive-panel.md 的 Google 401 行）；
+	//   v2(hub 直连):    401/409 —— hub 数据面的 not_warmed（v0.4.1 冻结语义），
+	//                    换链请求附带 stale=1 让 master 现场重预热（N4/R1）。
 	// 这一步必须保留：前缀已写出无法回退，但不影响把余段补齐；而 Link() 只在
 	// expires_at−25s 才自己刷新，客户端"重试自愈"在此之前拿到的仍是同一条失效直链，
 	// 会一直循环到余量窗口——长播放跨令牌边界（面板头约 1h 过期）时"不得中断播放"
 	// 的硬约束就落不了地。
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+	shouldRetry := resp.StatusCode == http.StatusUnauthorized
+	if hubDirect {
+		shouldRetry = shouldRetry || resp.StatusCode == http.StatusConflict
+	} else {
+		shouldRetry = shouldRetry || resp.StatusCode == http.StatusForbidden
+	}
+	if shouldRetry {
 		_ = resp.Body.Close()
 		h.log.Warn("上游返回错误，重拉直链后重试一次",
 			"file_id", fileID, "upstream_status", resp.StatusCode)
-		refreshed, rerr := h.cfg.Links.Refresh(r.Context(), fileID)
+		refreshed, rerr := h.refreshForRetry(r.Context(), fileID, hubDirect)
 		if rerr != nil {
 			return h.abortMixed(fileID, "混合服务：重拉直链失败，断开连接（前缀已写出，无法回退）",
 				"error", rerr)
