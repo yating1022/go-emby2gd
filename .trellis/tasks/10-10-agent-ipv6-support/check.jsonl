@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/agent-network.md", "reason": "核对零协议变更、心跳 v6 地址往返与安装脚本耦合"}
+{"file": ".trellis/spec/backend/http-proxy.md", "reason": "核对上游客户端默认行为零变化（auto=现状）、拨号改造未破坏契约"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "核对测试覆盖（v6 skip 语义、脚本沙盒）与日志规范"}

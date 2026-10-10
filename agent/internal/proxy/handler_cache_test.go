@@ -2,10 +2,15 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -53,7 +58,7 @@ func TestParseByteRange(t *testing.T) {
 // "缓存开"两条数据面上跑一遍，断言状态码、白名单响应头与响应体 sha256 完全一致。
 //
 // localOnly = true 时还断言缓存开的这一次完全没有触上游（局部命中/全命中的证据）。
-// 返回"缓存开"这一次的上游请求数，供调用方断言混合/回退的实际请求次数。
+// 返回"缓存开"这一次的上游请求数，供调用方断言混合/透传的实际请求次数。
 func compareCachedAgainstPassthrough(t *testing.T, cold, warm *cacheStack, g *googleFile, label, rng string, localOnly bool) int64 {
 	t.Helper()
 	coldResp := mustGet(t, cold.url("file-1", time.Now().Add(time.Hour)), rangeHeader(rng))
@@ -175,13 +180,13 @@ func TestCacheMixedServingIsByteIdentical(t *testing.T) {
 	assertBlockLens(t, warm.cache, "file-1", map[int64]int{0: blockSize})
 }
 
-// 混合服务必须"先打开上游、拿到响应头，再写第一个字节"：上游失败时完整回退透传，
-// 客户端拿到的仍是完整、正确的 206。
-func TestCacheMixedFallsBackWhenUpstreamFails(t *testing.T) {
+// 混合态"前缀先行"（v0.3.1）：前缀写出之后上游失败已无法回退——必须 WARN + 断开
+// 连接（等效网络中断）。客户端拿到的是"完整前缀 + 断连"，绝不能是旧语义的"整体
+// 回退"假象（那需要再发一次完整透传请求）。
+func TestCacheMixedAbortsWhenUpstreamFails(t *testing.T) {
 	content := randomContent(3*blockSize+777, 44)
 	g := newGoogleFile(t, content)
-	// 只让"从块边界开始的余段请求"失败：混合服务必须先看到它失败再决定回退，
-	// 因此客户端请求本身（bytes=0-）仍能被完整透传。
+	// 只让"从块边界开始的余段请求"失败——这正是混合态的续传请求。
 	g.setHook(func(w http.ResponseWriter, r *http.Request, g *googleFile) bool {
 		if strings.HasPrefix(r.Header.Get("Range"), fmt.Sprintf("bytes=%d-", blockSize)) {
 			http.Error(w, "boom", http.StatusInternalServerError)
@@ -190,65 +195,93 @@ func TestCacheMixedFallsBackWhenUpstreamFails(t *testing.T) {
 		return false
 	})
 
-	cold := newCacheStack(t, g, 0, 0, 0)
-	warm := newCacheStack(t, g, 64<<20, 4<<20, 0)
+	logs := &lockedLogBuffer{}
+	warm := newCacheStackWithLogger(t, g, 64<<20, 4<<20, 0, newWarnLogger(logs))
 	doGet(t, warm, "bytes=0-999")
 	waitBlockLens(t, warm.cache, "file-1", map[int64]int{0: blockSize})
 	waitPrefetchIdle(t, warm.prefetch)
 
-	// 1 次失败的余段请求 + 1 次完整透传；客户端拿到的仍是完整、正确的 206。
-	if got := compareCachedAgainstPassthrough(t, cold, warm, g, "上游失败回退", "bytes=0-", false); got != 2 {
-		t.Fatalf("应为 1 次失败的上游余段 + 1 次完整透传，实际 %d", got)
+	before := g.hits.Load()
+	resp := mustGet(t, warm.url("file-1", time.Now().Add(time.Hour)), rangeHeader("bytes=0-"))
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("前缀先行应先写出 206 头，实际 %d", resp.StatusCode)
 	}
+	body := readBodyExpectClosed(t, resp)
+	if len(body) != blockSize {
+		t.Fatalf("客户端应恰好拿到完整前缀（%d 字节）后断连，实际 %d 字节", blockSize, len(body))
+	}
+	if sha256Hex(body) != sha256Hex(content[:blockSize]) {
+		t.Fatal("断连前收到的应是完整、正确的前缀字节")
+	}
+	if got := g.hits.Load(); got != before+1 {
+		t.Fatalf("上游失败后不得再发一次完整透传（旧回退语义）：期望 1 次余段请求，实际 %d", got-before)
+	}
+	waitLogContains(t, logs, "断开连接")
 }
 
-// 上游余段的 ETag 与本地前缀不符 = 文件已换版本：必须整体回退，
-// 绝不能把两个版本的字节拼在一起。
-func TestCacheMixedFallsBackWhenIdentityMismatch(t *testing.T) {
+// 上游余段的身份与本地前缀不符 = 文件已换版本：前缀（旧版本字节）已经写出，
+// 不能再"整体回退"——WARN + 断开连接，绝不许把两个版本的字节拼给客户端。
+// 同时把新身份记进元数据（清掉旧块）：否则客户端每次重试都会"旧前缀 + 断连"
+// 循环，"客户端自愈重试"就是空话。
+func TestCacheMixedAbortsWhenIdentityMismatch(t *testing.T) {
 	size := 3*blockSize + 999
 	v1 := randomContent(size, 45)
 	v2 := randomContent(size, 46)
 	g := newGoogleFile(t, v1)
 	g.setETag(`"v1"`) // 表现 ETag 身份路径：真实 Google 主形态没有 ETag
 
-	cold := newCacheStack(t, g, 0, 0, 0)
-	warm := newCacheStack(t, g, 64<<20, 4<<20, 0)
+	logs := &lockedLogBuffer{}
+	warm := newCacheStackWithLogger(t, g, 64<<20, 4<<20, 0, newWarnLogger(logs))
 	doGet(t, warm, "bytes=0-999")
 	waitBlockLens(t, warm.cache, "file-1", map[int64]int{0: blockSize})
 	waitPrefetchIdle(t, warm.prefetch)
 
 	g.set(v2, `"v2"`) // 上游换版本
-	if got := compareCachedAgainstPassthrough(t, cold, warm, g, "身份不符整体回退", "bytes=0-", false); got != 2 {
-		t.Fatalf("应为 1 次身份不符的上游余段 + 1 次完整透传，实际 %d", got)
+	before := g.hits.Load()
+	resp := mustGet(t, warm.url("file-1", time.Now().Add(time.Hour)), rangeHeader("bytes=0-"))
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("前缀先行应先写出 206 头，实际 %d", resp.StatusCode)
 	}
+	body := readBodyExpectClosed(t, resp)
+	if len(body) != blockSize {
+		t.Fatalf("客户端应恰好拿到完整前缀（%d 字节）后断连，实际 %d 字节", blockSize, len(body))
+	}
+	if sha256Hex(body) != sha256Hex(v1[:blockSize]) {
+		t.Fatal("断连前收到的应是旧版本的完整前缀，不得混入新版本字节")
+	}
+	if got := g.hits.Load(); got != before+1 {
+		t.Fatalf("身份不符后不得再发一次完整透传（旧回退语义）：期望 1 次余段请求，实际 %d", got-before)
+	}
+	waitLogContains(t, logs, "身份")
 
-	// 透传观察到新 ETag → v1 的块已被清掉（此刻还没有新请求，状态是确定的）。
+	// 新身份已被观测 → 旧块清空；下一次请求前缀为空，走完整透传（完整回退窗口），
+	// 随后首触预取按新版本重建，恢复纯本地服务。
 	assertBlockLens(t, warm.cache, "file-1", nil)
-
-	// 后续请求必须拿到 v2 的字节（前缀若混了 v1 就会在这里现形）；
-	// 同时首触预取会按新版本重建缓存。
-	warmResp := mustGet(t, warm.url("file-1", time.Now().Add(time.Hour)), rangeHeader("bytes=0-"))
-	warmBody := readBody(t, warmResp)
-	if sha256Hex(warmBody) != sha256Hex(v2) {
-		t.Fatal("身份不符时必须整段回退，不得混版本")
+	resp2, body2 := doGet(t, warm, "bytes=0-1023")
+	if resp2.StatusCode != http.StatusPartialContent || sha256Hex(body2) != sha256Hex(v2[:1024]) {
+		t.Fatalf("重试必须拿到新版本字节：status=%d len=%d", resp2.StatusCode, len(body2))
 	}
 	waitPrefetchIdle(t, warm.prefetch)
-	if meta, ok := warm.cache.Meta("file-1"); !ok || meta.etag != `"v2"` {
-		t.Fatalf("重新预取后元数据应更新为 v2：%+v", meta)
+	waitBlockLens(t, warm.cache, "file-1", map[int64]int{0: blockSize})
+	hits := g.hits.Load()
+	resp3, body3 := doGet(t, warm, "bytes=0-1023")
+	if resp3.StatusCode != http.StatusPartialContent || !bytes.Equal(body3, v2[:1024]) {
+		t.Fatalf("重建后应本地命中新版本：status=%d", resp3.StatusCode)
 	}
-	assertBlockLens(t, warm.cache, "file-1", map[int64]int{0: blockSize})
+	if got := g.hits.Load(); got != hits {
+		t.Fatalf("重建后不应再触上游：%d → %d", hits, got)
+	}
 }
 
-// 上游忽略 Range 直接回 200 整文件时，余段的响应体不是请求的那一段：
-// 混合服务必须整体回退透传，绝不能把"本地前缀 + 错位数据"拼出去（那样客户端
-// 拿到的字节是静默损坏的）。预取路径对同一情况也是放弃（fetchBlock 的区间校验）。
-func TestCacheMixedFallsBackWhenUpstreamIgnoresRange(t *testing.T) {
+// 上游忽略 Range 直接回 200 整文件时，余段的响应体不是请求的那一段：绝不能把它
+// 续传出去（"本地前缀 + 错位数据"会声明着完整 Content-Length 静默损坏）。
+// 前缀已写出，只能 WARN + 断开连接。
+func TestCacheMixedAbortsWhenUpstreamIgnoresRange(t *testing.T) {
 	content := randomContent(3*blockSize+888, 47)
 	g := newGoogleFile(t, content)
 	// 只让"从块边界起的余段请求"被忽略：上游回 200 + 整文件；其余请求正常。
 	g.setHook(func(w http.ResponseWriter, r *http.Request, g *googleFile) bool {
 		if strings.HasPrefix(r.Header.Get("Range"), fmt.Sprintf("bytes=%d-", blockSize)) {
-			w.Header().Set("ETag", `"v1"`)
 			w.Header().Set("Content-Type", "video/x-matroska")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(content)
@@ -257,15 +290,225 @@ func TestCacheMixedFallsBackWhenUpstreamIgnoresRange(t *testing.T) {
 		return false
 	})
 
-	cold := newCacheStack(t, g, 0, 0, 0)
+	logs := &lockedLogBuffer{}
+	warm := newCacheStackWithLogger(t, g, 64<<20, 4<<20, 0, newWarnLogger(logs))
+	doGet(t, warm, "bytes=0-999")
+	waitBlockLens(t, warm.cache, "file-1", map[int64]int{0: blockSize})
+	waitPrefetchIdle(t, warm.prefetch)
+
+	before := g.hits.Load()
+	resp := mustGet(t, warm.url("file-1", time.Now().Add(time.Hour)), rangeHeader("bytes=0-"))
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("前缀先行应先写出 206 头，实际 %d", resp.StatusCode)
+	}
+	body := readBodyExpectClosed(t, resp)
+	if len(body) != blockSize {
+		t.Fatalf("200 整文件的字节不得续传出去（错位/重复数据）：实际 %d 字节", len(body))
+	}
+	if sha256Hex(body) != sha256Hex(content[:blockSize]) {
+		t.Fatal("断连前收到的应是完整、正确的前缀字节")
+	}
+	if got := g.hits.Load(); got != before+1 {
+		t.Fatalf("应只有 1 次被忽略 Range 的余段请求，实际 %d", got-before)
+	}
+	waitLogContains(t, logs, "未按 Range")
+}
+
+// 混合态的 401/403 必须沿用"失效缓存重拉一次再试"（冻结稿 §2.3；与透传路径和预取
+// 同一语义）：前缀已写出无法回退，但重拉直链后重试仍能把余段补齐，客户端拿到的是
+// 完整正确的响应。缺了这一步，客户端重试会一直撞同一条失效直链——Link() 只在
+// expires_at−25s 才自己刷新，长播放跨令牌边界时"不得中断播放"的硬约束就落不了地。
+func TestCacheMixedRefreshesLinkAndRetriesOn401(t *testing.T) {
+	content := randomContent(3*blockSize+555, 63)
+	g := newGoogleFile(t, content)
+	var retried atomic.Bool
+	g.setHook(func(w http.ResponseWriter, r *http.Request, g *googleFile) bool {
+		if !strings.HasPrefix(r.Header.Get("Range"), fmt.Sprintf("bytes=%d-", blockSize)) {
+			return false
+		}
+		if !retried.Swap(true) {
+			w.WriteHeader(http.StatusUnauthorized) // 第一次余段请求：直链已失效
+			return true
+		}
+		serveGoogleShape(w, r, content, "", time.Time{}) // 重拉直链后的重试：正常服务
+		return true
+	})
+
+	logs := &lockedLogBuffer{}
+	warm := newCacheStackWithLogger(t, g, 64<<20, 4<<20, 0, newWarnLogger(logs))
+	doGet(t, warm, "bytes=0-999")
+	waitBlockLens(t, warm.cache, "file-1", map[int64]int{0: blockSize})
+	waitPrefetchIdle(t, warm.prefetch)
+
+	masterBefore := warm.master.requests.Load()
+	hitsBefore := g.hits.Load()
+	resp, body := doGet(t, warm, "bytes=0-")
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("应回 206，实际 %d", resp.StatusCode)
+	}
+	if sha256Hex(body) != sha256Hex(content) {
+		t.Fatalf("重拉直链并重试后应给出完整正确的整段：len=%d", len(body))
+	}
+	if got := warm.master.requests.Load() - masterBefore; got != 1 {
+		t.Fatalf("401 后应恰好重拉一次直链，实际 %d 次", got)
+	}
+	if got := g.hits.Load() - hitsBefore; got != 2 { // 401 + 重试
+		t.Fatalf("应恰好 2 次余段上游请求（401 + 重试），实际 %d", got)
+	}
+	waitLogContains(t, logs, "重拉直链后重试一次")
+	if s := logs.String(); strings.Contains(s, "断开连接") {
+		t.Fatalf("重试成功不应断连：\n%s", s)
+	}
+}
+
+// 重拉直链后仍然 401 → 只重试**一次**，随即按断连语义放弃（不再无限重试、不再多拉
+// 直链）；客户端拿到"完整前缀 + 断连"，与其它上游失败一致。
+func TestCacheMixedAbortsWhenRetryAlsoUnauthorized(t *testing.T) {
+	content := randomContent(3*blockSize+666, 64)
+	g := newGoogleFile(t, content)
+	g.setHook(func(w http.ResponseWriter, r *http.Request, g *googleFile) bool {
+		if strings.HasPrefix(r.Header.Get("Range"), fmt.Sprintf("bytes=%d-", blockSize)) {
+			w.WriteHeader(http.StatusUnauthorized) // 每次余段请求都 401
+			return true
+		}
+		return false
+	})
+
+	logs := &lockedLogBuffer{}
+	warm := newCacheStackWithLogger(t, g, 64<<20, 4<<20, 0, newWarnLogger(logs))
+	doGet(t, warm, "bytes=0-999")
+	waitBlockLens(t, warm.cache, "file-1", map[int64]int{0: blockSize})
+	waitPrefetchIdle(t, warm.prefetch)
+
+	masterBefore := warm.master.requests.Load()
+	before := g.hits.Load()
+	resp := mustGet(t, warm.url("file-1", time.Now().Add(time.Hour)), rangeHeader("bytes=0-"))
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("前缀先行应先写出 206 头，实际 %d", resp.StatusCode)
+	}
+	body := readBodyExpectClosed(t, resp)
+	if len(body) != blockSize || sha256Hex(body) != sha256Hex(content[:blockSize]) {
+		t.Fatalf("断连前应恰好拿到完整前缀：len=%d", len(body))
+	}
+	if got := warm.master.requests.Load() - masterBefore; got != 1 {
+		t.Fatalf("应恰好重拉一次直链（不再多拉），实际 %d 次", got)
+	}
+	if got := g.hits.Load() - before; got != 2 { // 首次 401 + 唯一一次重试
+		t.Fatalf("重试一次后仍 401 应放弃：期望 2 次余段请求，实际 %d", got)
+	}
+	waitLogContains(t, logs, "断开连接")
+}
+
+// 前缀先行的 TTFB 断言（v0.3.1）：上游响应头被扣住不放行时，客户端**仍然先**
+// 拿到前缀字节——首字节到达必须先于上游放行。旧行为（等上游头再写第一个字节）
+// 会在这里被请求时限掐死。
+func TestCacheMixedWritesPrefixWithoutWaitingUpstream(t *testing.T) {
+	content := randomContent(3*blockSize+1234, 48)
+	g := newGoogleFile(t, content)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var relOnce sync.Once
+	releaseFn := func() { relOnce.Do(func() { close(release) }) }
+	defer releaseFn() // 失败路径也要放行，否则清理时 httptest.Server.Close 会等挂
+	g.setHook(func(w http.ResponseWriter, r *http.Request, g *googleFile) bool {
+		if !strings.HasPrefix(r.Header.Get("Range"), fmt.Sprintf("bytes=%d-", blockSize)) {
+			return false
+		}
+		close(entered) // 余段请求已到上游：扣住响应头不放行
+		<-release
+		serveGoogleShape(w, r, content, "", time.Time{})
+		return true
+	})
+
 	warm := newCacheStack(t, g, 64<<20, 4<<20, 0)
 	doGet(t, warm, "bytes=0-999")
 	waitBlockLens(t, warm.cache, "file-1", map[int64]int{0: blockSize})
 	waitPrefetchIdle(t, warm.prefetch)
 
-	// 1 次"忽略 Range 的余段响应" + 1 次完整透传；客户端拿到的仍是完整、正确的 206。
-	if got := compareCachedAgainstPassthrough(t, cold, warm, g, "上游忽略 Range 回退", "bytes=0-", false); got != 2 {
-		t.Fatalf("应为 1 次错位余段 + 1 次完整透传，实际 %d", got)
+	// 客户端带时限：旧行为会在这里超时，而不是"先读到前缀"。
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, warm.url("file-1", time.Now().Add(time.Hour)), nil)
+	if err != nil {
+		t.Fatalf("构造请求失败：%v", err)
+	}
+	req.Header.Set("Range", "bytes=0-")
+	before := g.hits.Load()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("前缀应先于上游响应头到达：%v", err)
+	}
+
+	// 先读 1KiB：此刻上游仍被扣着（尚未放行）——首字节不依赖上游响应头。
+	head := make([]byte, 1024)
+	if _, err := io.ReadFull(resp.Body, head); err != nil {
+		t.Fatalf("上游未放行时也应能读到前缀字节：%v", err)
+	}
+	if sha256Hex(head) != sha256Hex(content[:1024]) {
+		t.Fatal("先到达的 1KiB 应是缓存前缀的首段")
+	}
+	// 继续把整段前缀读完：handler 的前缀写受客户端背压，读空后它才能走到开上游那步。
+	prefix := make([]byte, blockSize-1024)
+	if _, err := io.ReadFull(resp.Body, prefix); err != nil {
+		t.Fatalf("读取完整前缀失败：%v", err)
+	}
+	if sha256Hex(prefix) != sha256Hex(content[1024:blockSize]) {
+		t.Fatal("前缀余下部分字节不符")
+	}
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("余段请求应在写前缀之后到达上游")
+	}
+
+	// 放行上游：续传补齐其余字节；整段与源内容逐字节一致。
+	releaseFn()
+	rest, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatalf("放行上游后应能读完整段：%v", err)
+	}
+	full := append(append(head, prefix...), rest...)
+	if resp.StatusCode != http.StatusPartialContent || sha256Hex(full) != sha256Hex(content) {
+		t.Fatalf("整段应逐字节一致：status=%d len=%d/%d", resp.StatusCode, len(full), len(content))
+	}
+	if got := resp.Header.Get("Content-Range"); got != fmt.Sprintf("bytes 0-%d/%d", len(content)-1, len(content)) {
+		t.Fatalf("Content-Range 应覆盖整个请求：%q", got)
+	}
+	if got := g.hits.Load(); got != before+1 {
+		t.Fatalf("应只有 1 次续传请求，实际 %d", got-before)
+	}
+}
+
+// design §3：新顺序下"完整回退"只保留给**前缀为空**的窄窗口——请求起点没有任何
+// 本地块（这里只缓存了块 0）：整体回退纯透传，客户端拿到完整正确的 206，
+// 不写前缀、不断连、无 WARN。混合候选但前缀为空时同样如此。
+func TestCacheFallsBackWhenPrefixEmpty(t *testing.T) {
+	content := randomContent(4*blockSize+4096, 49)
+	g := newGoogleFile(t, content)
+
+	logs := &lockedLogBuffer{}
+	warm := newCacheStackWithLogger(t, g, 64<<20, 4<<20, 0, newWarnLogger(logs))
+	doGet(t, warm, "bytes=0-999") // 只填块 0
+	waitBlockLens(t, warm.cache, "file-1", map[int64]int{0: blockSize})
+	waitPrefetchIdle(t, warm.prefetch)
+
+	// 起点在块 1（未缓存）：前缀为空 → 完整回退透传。
+	before := g.hits.Load()
+	rng := fmt.Sprintf("bytes=%d-%d", blockSize, 2*blockSize-1)
+	resp, body := doGet(t, warm, rng)
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("前缀为空应完整回退透传，实际 %d", resp.StatusCode)
+	}
+	if sha256Hex(body) != sha256Hex(content[blockSize:2*blockSize]) {
+		t.Fatalf("完整回退必须给出上游原文：len=%d", len(body))
+	}
+	if got := g.hits.Load(); got != before+1 {
+		t.Fatalf("前缀为空时应恰好 1 次上游请求，实际 %d", got-before)
+	}
+	if s := logs.String(); strings.Contains(s, "断开连接") {
+		t.Fatalf("前缀为空不应断连（完整回退仍成立）：\n%s", s)
 	}
 }
 
@@ -524,6 +767,56 @@ func TestCacheMirrorsUpstreamAcceptRanges(t *testing.T) {
 }
 
 // --- 小工具 -------------------------------------------------------------------
+
+// lockedLogBuffer 是并发安全的日志缓冲（数据面多个 goroutine 都会写日志）。
+type lockedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// newWarnLogger 只收集 WARN/ERROR 级日志（预取 INFO 的噪音不进断言）。
+func newWarnLogger(buf *lockedLogBuffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+}
+
+// waitLogContains 轮询等待日志出现 want（WARN 在断连前已写出，留余量防调度抖动）。
+func waitLogContains(t *testing.T, buf *lockedLogBuffer, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if strings.Contains(buf.String(), want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("日志应含 %q，实际：\n%s", want, buf.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// readBodyExpectClosed 读到连接被断开为止：混合态"前缀先行"在上游失败/校验不过
+// 时只能断连（头部已写出），客户端拿到的就是"完整前缀 + 读错误"。
+func readBodyExpectClosed(t *testing.T, resp *http.Response) []byte {
+	t.Helper()
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err == nil {
+		t.Fatalf("连接应被断开，但读到了完整的 %d 字节", len(body))
+	}
+	return body
+}
 
 // doGet 走一次带 Range 的客户端请求（拿签名 URL）。
 func doGet(t *testing.T, st *cacheStack, spec string) (*http.Response, []byte) {

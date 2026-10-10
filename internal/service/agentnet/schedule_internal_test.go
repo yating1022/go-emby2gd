@@ -357,6 +357,21 @@ func TestAgentBaseURL(t *testing.T) {
 			"http://[2001:db8::1]:8790",
 		},
 		{
+			"v6 public_base_url 原样使用(带端口)",
+			&agentRecord{PublicBaseURL: "http://[2408:8207:1234::5]:8790", LastIP: "10.0.0.1", ListenPort: 9999},
+			"http://[2408:8207:1234::5]:8790",
+		},
+		{
+			"v6 public_base_url 无端口也可用",
+			&agentRecord{PublicBaseURL: "https://[2001:db8::1]"},
+			"https://[2001:db8::1]",
+		},
+		{
+			"IPv6 来源地址 + 监听端口 0(回落默认端口)",
+			&agentRecord{LastIP: "::1"},
+			"http://[::1]:8790",
+		},
+		{
 			"public_base_url 非法时退回 IP 推导",
 			&agentRecord{PublicBaseURL: "10.0.0.1:8790", LastIP: "10.0.0.2", ListenPort: 8790},
 			"http://10.0.0.2:8790",
@@ -390,6 +405,12 @@ func TestParsePublicBaseURL(t *testing.T) {
 		{"  http://node.example.com:8790  ", "http://node.example.com:8790"},
 		{"https://node.example.com/", "https://node.example.com"},
 		{"http://192.168.1.5:8790", "http://192.168.1.5:8790"},
+		// IPv6 字面量: 节点用 --public-url 'http://[v6]:8790' 上报, master 原样保留
+		// (含方括号), 拿去拼客户端地址时才是合法 URL。
+		{"http://[2408:8207:1234::5]:8790", "http://[2408:8207:1234::5]:8790"},
+		{"http://[2001:db8::1]:8790/", "http://[2001:db8::1]:8790"},
+		{"https://[2001:db8::1]", "https://[2001:db8::1]"},
+		{"http://[::1]:8790", "http://[::1]:8790"},
 		{"", ""},
 		{"   ", ""},
 	}
@@ -415,6 +436,9 @@ func TestParsePublicBaseURL(t *testing.T) {
 		{"http://user:pass@node.example.com", "不能包含用户名或密码"},
 		{"http://node.example.com?a=1", "不能包含查询参数或片段"},
 		{"http://node.example.com#frag", "不能包含查询参数或片段"},
+		// IPv6 非法形态: 方括号未闭合连 url.Parse 都过不去(这是 master 能挡住的
+		// 一类手误; 未加方括号的裸 v6 字面量 url.Parse 会放行, 属已知边界)。
+		{"http://[2001:db8::1", "不是合法的地址"},
 	}
 	for _, tc := range invalid {
 		_, err := parsePublicBaseURL(tc.raw)

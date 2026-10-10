@@ -17,7 +17,8 @@
 # 配置已存在且**没有** `--force-enroll` 时：只换二进制 + 重启服务，**不**重新注册。
 # 这一点是刻意的：重新注册会轮换 secret/sign_key（父 design §6-3），
 # 而正在跑的那个进程手里还是旧密钥，重装一次就会把一台好节点短暂踢下线。
-# 要换注册 Token / 改 `--public-url` 时才用 `--force-enroll`。
+# 只有要换注册 Token 时才用 `--force-enroll`；改 `--public-url` 不必——幂等路径
+# 会锚定替换 config.env 里的 PUBLIC_BASE_URL 行（见 update_public_url）。
 #
 # ## ⚠️ enroll 之后必须把配置交给服务用户（否则服务起不来）
 #
@@ -32,8 +33,8 @@
 #
 # - `--download-base <地址|目录|file://目录>`：覆盖下载源（本地联调 / 内网镜像）；
 # - `GD_AGENT_INSTALL_ROOT=<目录>`：把整棵树装到该目录下（沙盒），并跳过所有
-#   systemd 操作。冒烟测试靠它把「下载 → 校验 → 安装 → enroll 失败」整条路径
-#   走完而不动这台机器（参考实现有对应 Python 沙盒测试；本仓库未移植）。
+#   systemd 操作。冒烟测试靠它把「下载 → 校验 → 安装 → 幂等路径」整条路径
+#   走完而不动这台机器（对应测试：internal/service/agentnet/installshell_sandbox_internal_test.go）。
 set -euo pipefail
 
 # agent 版本与资产名：**逐字**对应 .github/workflows/release-agent.yml 的三件资产
@@ -73,7 +74,10 @@ gd-agent 安装脚本
   --master <地址>        master 的地址（如 http://1.2.3.4:4445 或 https://gd.example.com）
   --token <Token>        节点注册 Token（master 网页「节点」页生成，只显示一次）
   --public-url <地址>    本机对客户端可见的地址（NAT 后 / 端口映射时**必须**给，
-                         否则 master 只能按源 IP 推导——那种地址客户端访问不到）
+                         否则 master 只能按源 IP 推导——那种地址客户端访问不到）。
+                         重跑脚本时给出它 = 就地更新 config.env 的 PUBLIC_BASE_URL
+                         行并重启服务（不重新注册、凭据不轮换）。
+                         IPv6 节点示例：--public-url 'http://[2408:xxxx::1]:8790'
   --port <端口>          数据面监听端口（默认 8790，非特权端口）
   --download-base <地址> 覆盖二进制下载源：http(s) 地址、本地目录或 file:// 目录
                          （本地联调 / 内网镜像用；不给则从 GitHub Release 直下）
@@ -81,6 +85,11 @@ gd-agent 安装脚本
   -h, --help             显示本帮助
 
 重跑 = 升级：配置已存在且未给 --force-enroll 时，只替换二进制并重启服务。
+
+客户端地址与 IPv6：
+  · 默认按心跳来源 IP 推导（master 看到的地址）；只有客户端访问不到它时才需要
+    --public-url。填 IPv6 地址时，只有具备 IPv6 的客户端能通过该地址取流。
+  · 节点监听为双栈（v4/v6 客户端都能连），但节点防火墙需放行 v6 端口。
 USAGE
 }
 
@@ -89,6 +98,46 @@ fail() {
   # 失败一律中文 + 退出码 1：这是用户唯一能看到的线索（日志里没有 token）。
   printf '%s %s\n' "[gd-agent] 安装失败：" "$*" >&2
   exit 1
+}
+
+# update_public_url 就地更新 config.env 的 PUBLIC_BASE_URL 行（重跑/升级路径）
+#
+# 只锚定替换 `^PUBLIC_BASE_URL=` 那一行，其余行原样保留；任何一步失败都
+# **不改动原文件**并以中文报错——写坏它等于把一台在线节点变成"地址不可推导"
+# （已建立的连接不受影响，但新播放会跳过该节点）。
+update_public_url() {
+  local file="$1"
+  local value="$2"
+  local tmp
+
+  if ! grep -q '^PUBLIC_BASE_URL=' "${file}"; then
+    fail "${file} 里没有 PUBLIC_BASE_URL 行，无法锚定替换；请手工补上该行（或加 --force-enroll 重新注册）"
+  fi
+  tmp="$(mktemp "${file}.tmp.XXXXXX")" ||
+    fail "无法在 $(dirname "${file}") 创建临时文件（检查磁盘空间与权限）"
+
+  # sed 替换串里这三个字符有特殊含义，必须转义；顺序不能反（先转义反斜杠自身）。
+  local escaped="${value//\\/\\\\}"
+  escaped="${escaped//&/\\&}"
+  escaped="${escaped//|/\\|}"
+  if ! sed "s|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=${escaped}|" "${file}" >"${tmp}"; then
+    rm -f "${tmp}"
+    fail "替换 ${file} 的 PUBLIC_BASE_URL 行失败（文件保持原样）"
+  fi
+  # 安全阀：替换后必须恰好一行 PUBLIC_BASE_URL。值里混进换行在参数校验处
+  # 就会被拦下，这里再兜一次"锚错位置"之类的意外。
+  local count
+  count="$(grep -c '^PUBLIC_BASE_URL=' "${tmp}" || true)"
+  if [[ "${count}" -ne 1 ]]; then
+    rm -f "${tmp}"
+    fail "替换 ${file} 后 PUBLIC_BASE_URL 行数不为 1（文件保持原样）"
+  fi
+
+  chmod 600 "${tmp}"
+  if ! mv -f "${tmp}" "${file}"; then
+    rm -f "${tmp}"
+    fail "保存 ${file} 失败（文件保持原样）"
+  fi
 }
 
 # --- 参数 -------------------------------------------------------------------
@@ -110,6 +159,57 @@ case "${PORT}" in
 esac
 if ((PORT < 1 || PORT > 65535)); then
   fail "--port 超出范围（1-65535）：${PORT}"
+fi
+
+# --public-url 预检：幂等路径会把它直接写进 config.env（没有 master 帮忙校验），
+# 坏值写进去 = 节点每个心跳都会被 master 400 拒绝，离线窗口（默认 45 秒）过后
+# 就从调度池掉出去（现象和"装好了但一直离线"一样）。规则与 master 的
+# parsePublicBaseURL 对齐：必须 http(s)、不允许空白（含换行——它是写进单行的值）、
+# userinfo、查询参数、片段，以及写法不全的 IPv6 地址。
+if [[ -n "${PUBLIC_URL}" ]]; then
+  # 必须 http(s) 且带主机名（"http://" / "http:///" 这类空主机名直接拒绝）。
+  case "${PUBLIC_URL}" in
+    http://[!/]* | https://[!/]*) ;;
+    *) fail "--public-url 必须是带主机名的 http(s) 地址（IPv6 示例：--public-url 'http://[2408:xxxx::1]:8790'）" ;;
+  esac
+  if [[ "${PUBLIC_URL}" != "${PUBLIC_URL//[[:space:]]/}" ]]; then
+    fail "--public-url 不能包含空白字符（空格 / 制表符 / 换行）"
+  fi
+  # 去掉结尾多余的 '/'（enroll 也这么归一化）。
+  while [[ "${PUBLIC_URL}" == */ ]]; do
+    PUBLIC_URL="${PUBLIC_URL%/}"
+  done
+
+  # authority 段（"://" 之后、第一个 '/' '?' '#' 之前）用于形态检查；
+  # 路径里出现这些字符不受影响（master 只对 host 做校验）。
+  PUBLIC_URL_AUTHORITY="${PUBLIC_URL#*://}"
+  PUBLIC_URL_AUTHORITY="${PUBLIC_URL_AUTHORITY%%[/?#]*}"
+  if [[ "${PUBLIC_URL_AUTHORITY}" == *"@"* ]]; then
+    fail "--public-url 不能包含用户名或密码（userinfo），只写 http://主机[:端口]"
+  fi
+  if [[ "${PUBLIC_URL}" == *"?"* || "${PUBLIC_URL}" == *"#"* ]]; then
+    fail "--public-url 不能包含查询参数（?）或片段（#）"
+  fi
+  if [[ "${PUBLIC_URL_AUTHORITY}" == \[* ]]; then
+    # IPv6：方括号要闭合、括号后只能跟端口、括号里不能为空。
+    if [[ "${PUBLIC_URL_AUTHORITY}" != *\]* ]]; then
+      fail "--public-url 的 IPv6 方括号未闭合（正确示例：--public-url 'http://[2408:xxxx::1]:8790'）"
+    fi
+    PUBLIC_URL_AFTER_BRACKET="${PUBLIC_URL_AUTHORITY#*\]}"
+    PUBLIC_URL_PORT="${PUBLIC_URL_AFTER_BRACKET#:}"
+    if [[ "${PUBLIC_URL_AUTHORITY}" == "[]"* ]]; then
+      fail "--public-url 的 IPv6 方括号里没有地址（正确示例：--public-url 'http://[::1]:8790'）"
+    fi
+    if [[ -n "${PUBLIC_URL_AFTER_BRACKET}" ]]; then
+      if [[ "${PUBLIC_URL_AFTER_BRACKET}" != :* || -z "${PUBLIC_URL_PORT}" || "${PUBLIC_URL_PORT}" == *[!0-9]* ]]; then
+        fail "--public-url 的方括号后只能跟端口（正确示例：--public-url 'http://[::1]:8790'）"
+      fi
+    fi
+  elif [[ "${PUBLIC_URL_AUTHORITY}" == *:*:* ]]; then
+    # 多个冒号又不带方括号 = 裸 IPv6 字面量：master 的 url.Parse 会放行，
+    # 但拼出来的客户端地址浏览器/播放器解析不了，这里直接拦下并给出正确写法。
+    fail "--public-url 的 IPv6 地址必须加方括号（正确示例：--public-url 'http://[::1]:8790'）"
+  fi
 fi
 
 # --- 沙盒（仅自动化测试用）---------------------------------------------------
@@ -289,10 +389,18 @@ fi
 if [[ ! -f "${CONFIG_FILE}" ]]; then
   fail "配置文件 ${CONFIG_FILE} 不存在：注册未成功完成，无法启动服务"
 fi
+
+# 升级路径的 --public-url：不重新注册（凭据不轮换），只就地改 config.env 的
+# PUBLIC_BASE_URL 行；下面的启动段会重启服务，改动立即生效。
+if [[ "${NEED_ENROLL}" -eq 0 && -n "${PUBLIC_URL}" ]]; then
+  update_public_url "${CONFIG_FILE}" "${PUBLIC_URL}"
+  log "已更新对外地址：PUBLIC_BASE_URL=${PUBLIC_URL}（服务重启后生效）"
+fi
+
 # 幂等路径（配置早就存在）里也要保证属主正确——旧版本脚本装过的机器上，
 # 这个文件很可能还是 root:root（这正是那次 EACCES 的成因）。
 # 沙盒里 SERVICE_USER 就是当前用户，chown 是空操作，但**照样执行**：
-# 于是这条修复路径在沙盒测试里也被真的走到（参考实现有对应测试；本仓库未移植）。
+# 于是这条修复路径在沙盒测试里也被真的走到（installshell_sandbox_internal_test.go）。
 chown "${SERVICE_USER}:${SERVICE_USER}" "${CONFIG_FILE}"
 chmod 600 "${CONFIG_FILE}"
 
@@ -315,4 +423,4 @@ fi
 log "完成。服务状态：systemctl status ${SERVICE_NAME}"
 log "看日志：journalctl -u ${SERVICE_NAME} -f"
 log "回到 master 网页「节点」页：节点会在第一次心跳（15 秒内）后出现在线；"
-log "NAT 后的机器若显示不出地址，请带 --public-url <本机对外地址> 重跑本脚本并加 --force-enroll。"
+log "NAT 后的机器若显示不出地址，请带 --public-url <本机对外地址> 重跑本脚本（就地更新配置并重启，无需 --force-enroll）。"

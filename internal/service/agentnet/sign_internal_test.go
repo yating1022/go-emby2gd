@@ -216,6 +216,122 @@ func TestSignClientURL_AddressDerivation(t *testing.T) {
 	}
 }
 
+// v6 基址的签名全链: 地址组装(方括号 + 端口)与签名消息在 v6 下同样成立
+//
+// A1: 签名只取决于 file_id / e / sign_key, 与基址无关——这里刻意断言与 v4
+// 冻结向量**逐字相同**的签名, 用来证明"换 v6 基址没有动签名计算"。
+func TestSignClientURL_IPv6Base(t *testing.T) {
+	cases := []struct {
+		name string
+		rec  *agentRecord
+		want string
+	}{
+		{
+			"按 v6 来源 IP 推导(JoinHostPort 补方括号)",
+			&agentRecord{ID: "agent-v6", SignKey: masterSignKeyHex, LastIP: "2001:db8::1", ListenPort: 8790},
+			"http://[2001:db8::1]:8790/dl/" + masterSignFileID + "?e=" + masterSignExpiry + "&s=" + masterSignSignature,
+		},
+		{
+			"v6 public_base_url 原样使用(带端口)",
+			&agentRecord{ID: "agent-v6", SignKey: masterSignKeyHex, PublicBaseURL: "http://[2408:8207:1234::5]:8790"},
+			"http://[2408:8207:1234::5]:8790/dl/" + masterSignFileID + "?e=" + masterSignExpiry + "&s=" + masterSignSignature,
+		},
+		{
+			"v6 public_base_url 无端口",
+			&agentRecord{ID: "agent-v6", SignKey: masterSignKeyHex, PublicBaseURL: "https://[2001:db8::1]"},
+			"https://[2001:db8::1]/dl/" + masterSignFileID + "?e=" + masterSignExpiry + "&s=" + masterSignSignature,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			url, err := signClientURL(tc.rec, masterSignGDPath, time.Unix(1760000000, 0))
+			if err != nil {
+				t.Fatalf("签发失败: %v", err)
+			}
+			if url != tc.want {
+				t.Fatalf("v6 基址签发的地址不符:\n实际 %s\n期望 %s", url, tc.want)
+			}
+			// 独立复算: 不走 signMessage, 直接拼消息与 HMAC
+			mac := hmac.New(sha256.New, masterSignKeyBytes(t))
+			mac.Write([]byte("v1\n" + masterSignFileID + "\n" + masterSignExpiry))
+			if got := hex.EncodeToString(mac.Sum(nil)); got != masterSignSignature {
+				t.Fatalf("独立复算不符: %s != %s", got, masterSignSignature)
+			}
+		})
+	}
+}
+
+// 心跳上报 v6 地址 → 调度 → 签发: 端到端全链在 v6 基址下可用
+func TestPickAndSign_IPv6Addresses(t *testing.T) {
+	cases := []struct {
+		name          string
+		lastIP        string
+		publicBaseURL string
+		wantPrefix    string
+	}{
+		{
+			name:       "v6 来源 IP",
+			lastIP:     "2001:db8::9",
+			wantPrefix: "http://[2001:db8::9]:8790/dl/",
+		},
+		{
+			name:          "v6 public_base_url",
+			lastIP:        "10.0.0.9",
+			publicBaseURL: "http://[2408:8207:1234::5]:8790",
+			wantPrefix:    "http://[2408:8207:1234::5]:8790/dl/",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupStateDir(t)
+			setupAgentConfig(t, true)
+
+			result, err := defaultRegistry.enroll(testEnrollParams("machine-v6"))
+			if err != nil {
+				t.Fatalf("注册失败: %v", err)
+			}
+			if _, err := defaultRegistry.touch(result.AgentID, heartbeatParams{
+				LastIP:        tc.lastIP,
+				PublicBaseURL: tc.publicBaseURL,
+				Now:           time.Now(),
+			}); err != nil {
+				t.Fatalf("心跳失败: %v", err)
+			}
+
+			url, err := PickAndSign(masterSignGDPath)
+			if err != nil {
+				t.Fatalf("调度失败: %v", err)
+			}
+			prefix := tc.wantPrefix + fileToken(masterSignGDPath) + "?e="
+			if !strings.HasPrefix(url, prefix) {
+				t.Fatalf("地址形状不符: %s", url)
+			}
+
+			// 从 URL 里取出 e 与 s, 用节点当前密钥独立复算
+			query := strings.TrimPrefix(url, prefix)
+			expiry, sign, ok := strings.Cut(query, "&s=")
+			if !ok {
+				t.Fatalf("地址缺少签名参数: %s", url)
+			}
+			list, err := defaultRegistry.snapshot()
+			if err != nil {
+				t.Fatalf("读取注册表失败: %v", err)
+			}
+			key, err := hex.DecodeString(list[0].SignKey)
+			if err != nil {
+				t.Fatalf("节点 sign_key 不是合法 hex: %v", err)
+			}
+			mac := hmac.New(sha256.New, key)
+			mac.Write([]byte("v1\n" + fileToken(masterSignGDPath) + "\n" + expiry))
+			if want := hex.EncodeToString(mac.Sum(nil)); sign != want {
+				t.Fatalf("v6 链路的签名无法独立复算:\n实际 %s\n期望 %s", sign, want)
+			}
+		})
+	}
+}
+
 func TestPickAndSign(t *testing.T) {
 	t.Run("未启用", func(t *testing.T) {
 		setupStateDir(t)

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
@@ -177,6 +178,13 @@ type cacheStack struct {
 // newCacheStack 组装数据面；cacheBytes == 0 即"缓存关"（v0.2 行为，供逐字节对照）。
 func newCacheStack(t *testing.T, g *googleFile, cacheBytes, headBytes, tailBytes int64) *cacheStack {
 	t.Helper()
+	return newCacheStackWithLogger(t, g, cacheBytes, headBytes, tailBytes, discardLogger())
+}
+
+// newCacheStackWithLogger 同 newCacheStack，但把数据面（Handler 与预取器）的日志
+// 接到指定 logger——断言 WARN 文案的用例用（混合态"断开连接"语义看日志最直接）。
+func newCacheStackWithLogger(t *testing.T, g *googleFile, cacheBytes, headBytes, tailBytes int64, logger *slog.Logger) *cacheStack {
+	t.Helper()
 	signKey := testSignKey(t)
 	master := newFakeMaster(t, func(w http.ResponseWriter, r *http.Request, n int64) {
 		_, _ = w.Write([]byte(linkJSON(g.linkURL(), time.Hour)))
@@ -186,7 +194,7 @@ func newCacheStack(t *testing.T, g *googleFile, cacheBytes, headBytes, tailBytes
 	prefetch := NewPrefetcher(PrefetcherConfig{
 		Cache:     cache,
 		Links:     source,
-		Logger:    discardLogger(),
+		Logger:    logger,
 		HeadBytes: headBytes,
 		TailBytes: tailBytes,
 	})
@@ -194,7 +202,7 @@ func newCacheStack(t *testing.T, g *googleFile, cacheBytes, headBytes, tailBytes
 		SignKey:       signKey,
 		MaxConcurrent: 8,
 		Links:         source,
-		Logger:        discardLogger(),
+		Logger:        logger,
 		Cache:         cache,
 		Prefetch:      prefetch,
 	})

@@ -24,8 +24,9 @@ func TestInstallScript_GetServesEmbeddedShell(t *testing.T) {
 	if !strings.HasPrefix(recorder.Body.String(), "#!/usr/bin/env bash") {
 		t.Error("脚本首行应是 bash shebang")
 	}
-	// 脚本必须接受安装命令里传的两个参数, 否则一键命令装不上
-	for _, flag := range []string{"--master", "--token"} {
+	// 脚本必须接受安装命令里传的参数, 否则一键命令装不上;
+	// --public-url 是 v6 接入与 NAT 场景的入口, 同样必须被 /install.sh 提供的脚本支持。
+	for _, flag := range []string{"--master", "--token", "--public-url"} {
 		if !strings.Contains(recorder.Body.String(), flag) {
 			t.Errorf("脚本未处理参数 %s", flag)
 		}

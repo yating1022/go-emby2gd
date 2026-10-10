@@ -219,11 +219,46 @@ usage byte-for-byte — grep both sides when changing.
 Install-script invariants: re-run = binary replace + restart, **no re-enroll** (re-enrolling rotates
 keys out from under the live process) unless `--force-enroll`; after enroll, `chown gd-agent:gd-agent`
 + 0600 on the config — otherwise `serve` gets EACCES and the node is "installed but forever offline".
+On a re-run, `--public-url` does **not** re-enroll: the script anchors a replacement of the
+`PUBLIC_BASE_URL=` line in config.env (any failure leaves the file byte-identical) and the follow-up
+restart applies it; only `--force-enroll` rotates credentials. The script's `--public-url` pre-check
+refuses values that would break the node at the next heartbeat: userinfo, query/fragment and
+unclosed / dangling / empty IPv6 brackets (the master rejects these with 400 — the heartbeat stalls
+and the node drops out of the scheduling pool), plus, deliberately stricter than the master, any
+whitespace and an unbracketed v6 literal (`url.Parse` tolerates a space inside a path and the
+unbracketed literal, but the resulting client address is not usable).
 
 ### 3.9 Error shape (agent-facing)
 
 `{"ok":false,"error":{"code":"...","message":"中文"}}` + a meaningful status code. The agent client
 accepts bare-object and `{ok,data}` envelopes — never invent a third shape.
+
+### 3.10 IPv6 client-side access (client → agent)
+
+The client→node leg supports IPv6 with **zero protocol change**: set the node's
+`PUBLIC_BASE_URL=http://[2408:xxxx::1]:8790` (install script:
+`--public-url 'http://[2408:xxxx::1]:8790'`). The heartbeat reports it, the master stores it
+(§3.2 non-empty overwrite), and `agentBaseURL` uses the bracketed literal verbatim as the base of the
+307 Location / signed URL. Without `public_base_url` the master derives the address from `last_ip`
+via `net.JoinHostPort`, which brackets a v6 literal automatically. No new field, no new config key.
+
+Formula check (pinned by tests): `parsePublicBaseURL` accepts `http://[v6]:port` and `https://[v6]`
+(bracketed, with or without port); an unclosed bracket (`http://[2001:db8::1`) is rejected. Known
+boundary: an *unbracketed* v6 literal passes `url.Parse` untouched — operators must write the
+brackets (the `--public-url` help text shows the form; the install script rejects the bare form and
+pre-checks whitespace / userinfo / query / fragment / bracket shapes, but does not fully parse the
+host).
+
+Deployment boundaries:
+
+- A v6 base URL only reaches clients that have IPv6; leave `--public-url` unset for v4-only
+  audiences (the derived address then depends on what the master sees).
+- The node listens dual-stack (`net.Listen(":8790")` → `::` with `v6only=0` on Linux); the node
+  firewall still has to allow the v6 port.
+- Master-side preheat is issued by the master itself: a v4-only master cannot reach a pure-v6 node,
+  so preheat degrades silently (WARN) — playback is unaffected, only that warm-up path is lost.
+- Node → Google egress has **no** address-family control (plain Go dual-stack dial, by decision);
+  node → master is unchanged (use a v6-shaped `MASTER_URL` if that leg ever needs v6).
 
 ## 4. Validation & Error Matrix
 
@@ -260,6 +295,14 @@ accepts bare-object and `{ok,data}` envelopes — never invent a third shape.
   branches (200/400/401/502); admin list serialization must not contain secret/sign_key.
 - `internal/service/emby/redirect_agent_test.go` — 302 URL signature recomputed independently (never
   call the function under test); three-way grading; log hygiene (`s`, full URL, sign_key absent).
+- v6 client access — `parsePublicBaseURL` (`http://[v6]:port`, bracketed v6 without port, unclosed
+  bracket rejected), `agentBaseURL` (v6 `last_ip` → `http://[v6]:port`; v6 `public_base_url` used
+  verbatim), `signClientURL` / `PickAndSign` full chain with a v6 base (signature recomputed
+  independently), and the install-script sandbox cases (`--public-url` on a re-run replaces exactly
+  one `PUBLIC_BASE_URL` line, is idempotent, sed metacharacters / `$( )` land literally, values the
+  master would 400 (userinfo / query / fragment / bad brackets) and bare v6 are refused, a run
+  without `--public-url` leaves the file byte-identical and the same file (`os.SameFile`), and every
+  failure path leaves config.env byte-identical).
 - `internal/web/route_internal_test.go` — rules registered before `Reg_All`; HEAD exemption applies
   only to `/install.sh` (normal paths keep the empty-200 HEAD).
 - `internal/e2e/` (real agent subprocess + real gateway server + mock panel/Google/Emby) — matrix

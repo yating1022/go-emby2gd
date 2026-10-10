@@ -248,9 +248,16 @@ const maxCachePrefixBytes = 32 << 20
 
 // serveCached 尝试用本地块服务该 Range：
 //
-//	全命中 → 纯本地 206（**不触上游**）
-//	部分命中 → 混合：先打开上游 [start+c, end] 请求，**成功后才写第一个字节**
-//	未命中/不可用 → 返回 served=false，调用方走现状**纯透传**（不缓存任何字节）
+//	全命中   → 纯本地 206（**不触上游**）
+//	部分命中 → 混合（v0.3.1 起"前缀先行"）：**先**写 206 头 + 缓存前缀并 Flush
+//	           （播放器立刻拿到起播数据，TTFB 降到 RTT 地板），**再**同步打开
+//	           上游 [start+n, end] 续传；续传校验（206 + 精确区间 + 身份一致）
+//	           通过后才开始拷贝。校验不过/打开失败 → WARN + 断开连接（头部与前缀
+//	           已经写出，无法再"整体回退"；断连等价网络中断，客户端自愈重试）。
+//	           上游 401/403 是唯一例外：重拉直链重试一次（与透传/预取同一语义，
+//	           冻结稿 §2.3），再失败才断开——否则"客户端重试"会一直撞失效直链。
+//	未命中/前缀为空 → 返回 served=false，调用方走现状**纯透传**（"完整回退"
+//	           只保留给这条路径）。
 //
 // 只有"能完整解析出 bytes=<start>-<end?>、长度已知且身份可判"的请求才会走到这里。
 func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, fileID string, rng byteRange, link Link) (int, bool) {
@@ -293,46 +300,16 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, fileID str
 	}
 	prefix, n := h.cache.Prefix(fileID, identity, start, limit)
 	if n == 0 {
+		// 前缀为空：还没有写出任何字节，仍可完整回退透传（design §3 的窄窗口）。
 		return 0, false
 	}
 
-	resp, err := h.doUpstreamRange(r.Context(), link, start+n, end)
-	if err != nil {
-		h.log.Warn("混合服务：上游请求失败，整体回退透传", "file_id", fileID, "error", err)
-		return 0, false
-	}
-	if !isCacheableStatus(resp.StatusCode) {
-		_ = resp.Body.Close()
-		h.log.Warn("混合服务：上游状态异常，整体回退透传",
-			"file_id", fileID, "upstream_status", resp.StatusCode)
-		return 0, false
-	}
-	// 余段响应必须**确实是** [start+n, end]：上游可能忽略 Range 直接回 200 整文件
-	// （或回报别的区间）。照抄这种响应体就会把"本地前缀 + 错位数据"拼给客户端——
-	// 而且声明了 Content-Length，客户端拿到的是静默损坏的字节。宁可整体回退透传：
-	// 透传把上游行为原样转给客户端，也就与"缓存关"逐字节一致（预取路径对同一
-	// 情况也是同样的处理：区间不符即放弃，见 prefetch.go fetchBlock）。
-	if resp.StatusCode != http.StatusPartialContent {
-		_ = resp.Body.Close()
-		h.log.Warn("混合服务：上游未按 Range 回 206，整体回退透传",
-			"file_id", fileID, "upstream_status", resp.StatusCode)
-		return 0, false
-	}
-	if gotStart, gotEnd, ok := responseRange(resp); !ok || gotStart != start+n || gotEnd != end {
-		_ = resp.Body.Close()
-		h.log.Warn("混合服务：上游响应区间与请求不符，整体回退透传",
-			"file_id", fileID, "want_start", start+n, "want_end", end,
-			"got_start", gotStart, "got_end", gotEnd)
-		return 0, false
-	}
-	// 上游余段的身份必须与本地前缀一致：不一致等于把两个版本的数据拼给客户端。
-	if got := responseMeta(resp).identity(); got != identity {
-		_ = resp.Body.Close()
-		h.log.Warn("混合服务：上游内容身份与本地前缀不符，整体回退透传", "file_id", fileID)
-		return 0, false
-	}
-	defer resp.Body.Close()
-
+	// 混合态"前缀先行"（v0.3.1）：先把 206 头 + 本地前缀推给客户端并 Flush，
+	// 再去打开上游续传。播放器首读的 TTFB 因此不再包含"等上游响应头"的时间
+	// （实测那一段就有 1.6–5.8s）。
+	//
+	// 代价（design §2 明确接受）：头部/前缀一旦写出就收不回来，上游失败或校验
+	// 不过时不能再"整体回退透传"——只能断开连接（等价网络中断，客户端重试）。
 	writeCachedHeaders(w.Header(), meta, start, end)
 	w.WriteHeader(http.StatusPartialContent)
 	flush := newFlushWriter(w)
@@ -340,7 +317,72 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, fileID str
 		h.log.Info("客户端断开，混合响应未写完", "file_id", fileID)
 		return http.StatusPartialContent, true
 	}
+	if start+n > end {
+		// 前缀已覆盖整个请求（与 FullHit 之间被并发填充）：没有余段要续传。
+		h.log.Info("混合服务：本地前缀 + 上游续传",
+			"file_id", fileID, "prefix_bytes", n, "start", start, "end", end)
+		return http.StatusPartialContent, true
+	}
+
+	resp, err := h.doUpstreamRange(r.Context(), link, start+n, end)
+	if err != nil {
+		return h.abortMixed(fileID, "混合服务：上游请求失败，断开连接（前缀已写出，无法回退）",
+			"error", err)
+	}
+	// 直链可能已过期/被撤销：与透传路径（serve）和预取（prefetch.go request）**同一
+	// 语义**——失效缓存重拉一次再试（冻结稿 §2.3；gdrive-panel.md 的 Google 401 行）。
+	// 这一步必须保留：前缀已写出无法回退，但不影响把余段补齐；而 Link() 只在
+	// expires_at−25s 才自己刷新，客户端"重试自愈"在此之前拿到的仍是同一条失效直链，
+	// 会一直循环到余量窗口——长播放跨令牌边界（面板头约 1h 过期）时"不得中断播放"
+	// 的硬约束就落不了地。
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		_ = resp.Body.Close()
+		h.log.Warn("上游返回错误，重拉直链后重试一次",
+			"file_id", fileID, "upstream_status", resp.StatusCode)
+		refreshed, rerr := h.cfg.Links.Refresh(r.Context(), fileID)
+		if rerr != nil {
+			return h.abortMixed(fileID, "混合服务：重拉直链失败，断开连接（前缀已写出，无法回退）",
+				"error", rerr)
+		}
+		resp, err = h.doUpstreamRange(r.Context(), refreshed, start+n, end)
+		if err != nil {
+			return h.abortMixed(fileID, "混合服务：上游请求失败，断开连接（前缀已写出，无法回退）",
+				"error", err)
+		}
+	}
+	if !isCacheableStatus(resp.StatusCode) {
+		_ = resp.Body.Close()
+		return h.abortMixed(fileID, "混合服务：上游状态异常，断开连接（前缀已写出，无法回退）",
+			"upstream_status", resp.StatusCode)
+	}
+	// 余段响应必须**确实是** [start+n, end]：上游可能忽略 Range 直接回 200 整文件
+	// （或回报别的区间）。照抄这种响应体就会把"本地前缀 + 错位数据"拼给客户端——
+	// 而且声明了 Content-Length，客户端拿到的是静默损坏的字节。前缀已写出，
+	// 只能断连：假回退会拼出自相矛盾的响应，断连至少让客户端重试自愈。
+	if resp.StatusCode != http.StatusPartialContent {
+		_ = resp.Body.Close()
+		return h.abortMixed(fileID, "混合服务：上游未按 Range 回 206，断开连接（前缀已写出，无法回退）",
+			"upstream_status", resp.StatusCode)
+	}
+	if gotStart, gotEnd, ok := responseRange(resp); !ok || gotStart != start+n || gotEnd != end {
+		_ = resp.Body.Close()
+		return h.abortMixed(fileID, "混合服务：上游响应区间与请求不符，断开连接（前缀已写出，无法回退）",
+			"want_start", start+n, "want_end", end, "got_start", gotStart, "got_end", gotEnd)
+	}
+	// 上游余段的身份必须与本地前缀一致：不一致等于把两个版本的数据拼给客户端。
+	// 断连前把新身份记进元数据（清掉旧身份的块）——否则客户端每次重试都会
+	// "旧前缀 + 断连"循环，"客户端自愈重试"就落不了地（改动前是回退透传时
+	// 顺带观测到新身份的）。
+	if got := responseMeta(resp); got.identity() != identity {
+		h.cache.Observe(fileID, got)
+		_ = resp.Body.Close()
+		return h.abortMixed(fileID, "混合服务：上游内容身份与本地前缀不符，断开连接（前缀已写出，无法回退）")
+	}
+	defer resp.Body.Close()
+
 	if _, err := io.CopyBuffer(flush, resp.Body, make([]byte, copyBufferSize)); err != nil {
+		// 语义与改版前一致：客户端断开只记 INFO；上游中断记 ERROR（连接随后因
+		// Content-Length 未写满而关闭，客户端看到截断）。
 		if r.Context().Err() != nil || errors.Is(err, context.Canceled) {
 			h.log.Info("客户端断开，已取消上游读取", "file_id", fileID)
 		} else {
@@ -350,6 +392,18 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, fileID str
 	h.log.Info("混合服务：本地前缀 + 上游续传",
 		"file_id", fileID, "prefix_bytes", n, "start", start, "end", end)
 	return http.StatusPartialContent, true
+}
+
+// abortMixed 记 WARN 后立刻断开连接：响应头与本地前缀已经写出，状态码与已发字节
+// 都收不回来，"整体回退透传"不可能——继续写只会给客户端拼出一个自相矛盾的响应
+// （"完整正确响应却谎称回退"正是本次要消灭的假象）。断开走 net/http 的哨兵 panic
+// （http.ErrAbortHandler，不会打栈），等价网络中断，客户端会自行重试；缓存状态由
+// 后续请求/首触预取自愈。
+//
+// 返回值只为让调用点写成 `return h.abortMixed(...)`；本函数不会真正返回。
+func (h *Handler) abortMixed(fileID, msg string, args ...any) (int, bool) {
+	h.log.Warn(msg, append([]any{"file_id", fileID}, args...)...)
+	panic(http.ErrAbortHandler)
 }
 
 // doUpstreamRange 只取文件区间 [start, end] 的上游请求（混合服务用）。
