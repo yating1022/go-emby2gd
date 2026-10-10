@@ -155,6 +155,14 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, fileID string) i
 		<-h.sem
 	}()
 
+	// 让路登记（v0.3.2）：GET 请求在途期间，同文件的预取读取循环暂停，把出口
+	// 带宽让给客户端（design 2026-10-10 §2.2）。只登记 GET；注销用 defer，任何
+	// 返回路径都会配对归还。
+	if r.Method == http.MethodGet {
+		h.prefetch.ClientBegin(fileID)
+		defer h.prefetch.ClientEnd(fileID)
+	}
+
 	// 首触预取：该文件第一次被请求时异步把头部/尾部拉进缓存（内部判重与开关）。
 	// 异步且不返回错误——绝不影响本次请求的响应与耗时。
 	h.prefetch.MaybeStart(fileID)

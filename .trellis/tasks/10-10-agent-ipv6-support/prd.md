@@ -21,9 +21,9 @@
 
 ## Acceptance Criteria
 
-- [ ] **A1** master：v6 `public_base_url` / v6 `last_ip` / 签名全链用例（**生产代码零改动**——链路已具备，只补测试）。
-- [ ] **A2** 安装脚本：`--public-url` 幂等路径写通、失败不改文件（沙盒用例）。
-- [ ] **A3** 真机（随发布）：一台有 v6 的节点设 v6 `PUBLIC_BASE_URL` → 节点页地址为 v6 → 客户端 307 落到 v6 地址并成功拉流。
+- [x] **A1** master：v6 `public_base_url` / v6 `last_ip` / 签名全链用例（**生产代码零改动**——链路已具备，只补测试）。
+- [x] **A2** 安装脚本：`--public-url` 幂等路径写通、失败不改文件（沙盒用例；检查补 4 类预检拒绝 + 3 组用例）。
+- [x] **A3** 真机（随发布）：Zouter 设 v6 `PUBLIC_BASE_URL` → master 组装 Address 为 `http://[2a0e:97c0:3f0:1::1b01]:8790` ✓ → v6 直连实测 12MB/s（其 v4 从家庭网络不通）✓。
 
 ## Out of Scope
 

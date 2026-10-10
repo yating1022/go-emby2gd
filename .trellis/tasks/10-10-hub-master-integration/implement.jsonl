@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/agent-network.md", "reason": "enroll/心跳/直链换取的既有协议与状态文件约定——role 字段向后兼容的底线"}
+{"file": ".trellis/spec/backend/gdrive-panel.md", "reason": "直链公共面（ResolveTarget）——预热解析 fileID/直链/auth 的既有入口"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "测试与验收口径（对照式验收、负向验证、禁 commit）"}

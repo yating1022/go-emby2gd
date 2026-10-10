@@ -1,7 +1,7 @@
 {
-  "id": "playback-startup-boost",
-  "name": "playback-startup-boost",
-  "title": "起播加速：agent 读前缓存 + 网关预热",
+  "id": "cache-hub-center",
+  "name": "cache-hub-center",
+  "title": "大盘鸡缓存中心（hub）",
   "description": "",
   "status": "planning",
   "dev_type": null,
@@ -10,7 +10,7 @@
   "priority": "P2",
   "creator": "fruits",
   "assignee": "fruits",
-  "createdAt": "2026-10-09",
+  "createdAt": "2026-10-10",
   "completedAt": null,
   "branch": null,
   "base_branch": "main",
@@ -19,10 +19,9 @@
   "pr_url": null,
   "subtasks": [],
   "children": [
-    "10-09-agent-readahead-cache",
-    "10-09-gateway-preheat",
-    "10-10-mixed-serve-prefix-first",
-    "10-10-prefetch-stream-yield"
+    "10-10-hub-agent-mode",
+    "10-10-hub-master-integration",
+    "10-10-hub-deploy-verify"
   ],
   "parent": null,
   "relatedFiles": [],

@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/agent-network.md", "reason": "核对协议零破坏：node 角色行为、enroll/心跳兼容、日志不泄露敏感"}
+{"file": ".trellis/spec/backend/http-proxy.md", "reason": "核对三态服务与多地址拨号未破坏出站/流契约；字节一致性矩阵独立复跑"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "核对测试有效性：TTL/LRU/3 分钟时间线/区域集请求数断言不可自证；负向验证与对照式口径"}

@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/agent-network.md", "reason": "部署拓扑/注册表/心跳与日志规范——hub 上线后节点与 master 的既有约定不破坏"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "验收口径：对照式数据、负向验证（如非白名单拒绝）、无签名泄露"}

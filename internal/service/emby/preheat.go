@@ -3,10 +3,11 @@ package emby
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/AmbitiousJun/go-emby2openlist/v2/internal/config"
@@ -32,17 +33,19 @@ const (
 	// 与起播需要的数据量同级: 节点侧读前缓存的"首触预取"由这次请求触发。
 	preheatRange = "bytes=0-65535"
 
-	// preheatTimeout 预热请求的总超时
-	//
-	// 预热是尽力而为的后台动作: 超时即放弃, 不重试、不排队。
-	preheatTimeout = time.Second * 8
-
 	// preheatDedupTTL 同一文件的最短预热间隔
 	preheatDedupTTL = time.Minute * 10
 
 	// preheatDedupLimit 去重表容量上限
 	preheatDedupLimit = 1024
 )
+
+// preheatTimeout 预热请求的总超时
+//
+// 预热是尽力而为的后台动作: 超时即放弃, 不重试、不排队。
+// 8s 的值保持不动（2026-10-10 定版）: 它只用于等待响应头——请求发送成功即
+// 触发语义达成; 测试用例可临时调小它以覆盖超时分级分支。
+var preheatTimeout = time.Second * 8
 
 // preheatDedup 预热去重表: gdPath -> 最近一次触发时刻
 //
@@ -228,40 +231,80 @@ func firePreheat(itemInfo ItemInfo) {
 	}
 
 	// 4 小 Range 打一枪, 触发节点侧读前缓存的首触预取
-	if err := preheatRequest(signedURL); err != nil {
-		logs.Warn("[网关预热] 预热请求失败: %v, 文件: %s", err, gdPath)
-		return
-	}
-	logs.Info("[网关预热] 已触发: %s", gdPath)
+	outcome, err := preheatRequest(signedURL)
+	logPreheatOutcome(outcome, err, gdPath)
 }
+
+// preheatOutcome 分级一次预热请求的语义结果（design §2.4 的超时语义）
+//
+// 预热是"触发式"动作: 节点一收到请求就会开始首触预取, 响应读不读不影响
+// 触发语义。唯一的真失败是请求没能送达节点（dial/连接类错误）。
+type preheatOutcome int
+
+const (
+	// preheatTriggered 节点已收到请求并返回正常响应(200/206), 触发完成
+	preheatTriggered preheatOutcome = iota
+	// preheatSentButNoReply 请求已送达, 但响应超时/不可读: 触发语义已完成
+	preheatSentButNoReply
+	// preheatBadStatus 请求已送达, 但节点返回了异常状态码: 真失败
+	preheatBadStatus
+	// preheatNotSent 请求未送达(dial/连接类错误): 真失败
+	preheatNotSent
+)
 
 // preheatRequest 向节点上的签名地址发一次小 Range 请求
 //
-// 只读取并丢弃响应体的一小段: 目的是让节点把首触预取的请求打出去,
-// 而不是由本进程搬运数据。签名地址含 s 参数, 不得写进日志(失败原因已足够定位)。
-func preheatRequest(signedURL string) error {
+// 拿到响应头即算完成: **不读响应体直接关闭** —— 触发语义在节点侧已经达成,
+// 读 body 只会白占连接与流量; 旧版"读完 body 才算成功"正是假告警的来源
+// (触发已送达, 只是响应体读取超时)。
+// 传输错误按"请求是否已送达"分级: httptrace 的 WroteRequest 一旦触发, 说明
+// 请求字节已经写给节点, 之后的超时只代表响应没等到, 预取不受影响。
+//
+// 签名地址含 s 参数, 不得写进日志(错误文本先经 redactSignedURL 抹除)。
+func preheatRequest(signedURL string) (preheatOutcome, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), preheatTimeout)
 	defer cancel()
+
+	// 判据: 请求字节是否已写到连接上(已送达节点)
+	var sent atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		WroteRequest: func(httptrace.WroteRequestInfo) { sent.Store(true) },
+	})
 
 	resp, err := https.Get(signedURL).
 		Header(http.Header{"Range": []string{preheatRange}}).
 		Context(ctx).
 		DoSingle()
 	if err != nil {
-		return fmt.Errorf("请求节点失败: %s", redactSignedURL(err, signedURL))
+		if sent.Load() {
+			return preheatSentButNoReply, fmt.Errorf("等待节点响应失败: %s", redactSignedURL(err, signedURL))
+		}
+		return preheatNotSent, fmt.Errorf("请求节点失败: %s", redactSignedURL(err, signedURL))
 	}
-	defer resp.Body.Close()
+	_ = resp.Body.Close() // 不读响应体: 触发已经达成
 
 	// 200 表示节点忽略了 Range 直接返回整份数据, 同样算预热成功
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return fmt.Errorf("节点返回了错误的响应码: %d", resp.StatusCode)
+		return preheatBadStatus, fmt.Errorf("节点返回了错误的响应码: %d", resp.StatusCode)
 	}
+	return preheatTriggered, nil
+}
 
-	// 丢弃响应体: 节点已经收到并处理了这次 Range 请求, 数据不必留在本进程
-	if _, err := io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024)); err != nil {
-		return fmt.Errorf("读取预热响应失败: %v", err)
+// logPreheatOutcome 按结果分级记日志（design §2.4）
+//
+// 未送达 = WARN（真失败）; 送达后响应超时 = INFO（触发语义已完成, 假告警）。
+func logPreheatOutcome(outcome preheatOutcome, err error, gdPath string) {
+	switch outcome {
+	case preheatTriggered:
+		logs.Info("[网关预热] 已触发: %s", gdPath)
+	case preheatSentButNoReply:
+		// 请求已送达节点, 首触预取已经开跑; 响应等不到不改变触发语义
+		logs.Info("[网关预热] 已触发（响应超时，节点侧预取不受影响）: %v, 文件: %s", err, gdPath)
+	case preheatBadStatus:
+		logs.Warn("[网关预热] 预热请求失败: %v, 文件: %s", err, gdPath)
+	default:
+		logs.Warn("[网关预热] 预热请求发送失败: %v, 文件: %s", err, gdPath)
 	}
-	return nil
 }
 
 // redactSignedURL 从错误文本中抹掉完整签名地址

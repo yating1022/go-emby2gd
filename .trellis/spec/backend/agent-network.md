@@ -260,6 +260,34 @@ Deployment boundaries:
 - Node → Google egress has **no** address-family control (plain Go dual-stack dial, by decision);
   node → master is unchanged (use a v6-shaped `MASTER_URL` if that leg ever needs v6).
 
+### 3.11 Agent read-ahead cache & prefetch (v0.3.1; rewritten v0.3.2 — frozen)
+
+Purpose: collapse Google's measured ~1s per-request init for the player's 3–6 startup probes.
+First touch prefetches head (32 MiB) + tail (4 MiB) into a pure in-memory LRU (`CACHE_BUDGET_MB`,
+default 256; TTL `CACHE_MAX_AGE_MINUTES`, default 1440). Serving is three-state: full-hit→local,
+prefix-hit→mixed (prefix-first), miss→passthrough. No tee — only prefetched blocks are ever cached.
+
+Frozen v0.3.2 contracts:
+
+- **One stream, sliced** — head prefetch is a single `Range: bytes=0-(head-1)` request whose body
+  is chopped into 4 MiB blocks as they fill (凑满即 Put); block 0 becomes servable before the
+  stream ends (`预取: 首块就绪` reports file_id/block/bytes/duration_ms). Upstream request count for
+  a full head+tail fill is O(1) — production smoke measured 9→2 (unit fixture 5→3).
+- **Never cache partial or misaligned blocks** — short read / early EOF fills only complete blocks;
+  an upstream that ignores Range (200 with non-zero start) or a start not block-aligned
+  (`gotStart%blockSize != 0`) drops the stream (already-complete blocks stay).
+- **Yield (让路)** — `ClientBegin/ClientEnd` wrap every GET in `serve()`; while a same-file client
+  request is in flight the prefetch waits (500 ms poll, checked every ≥1 MiB/250 ms) and resumes on
+  idle. No hard cap (by design).
+- **Resume (续取)** — trigger: the expected set (head 0..H-1 + tail) has gaps and nothing in
+  flight; only missing blocks are fetched (one stream from the first missing head block; tail
+  separately). Identity is seeded from `Cache.Meta` first — without it existing blocks read as
+  "missing" and get refetched.
+- **401/403 → single link refresh + retry** is preserved inside the single-stream path.
+- **Gateway preheat grading** (`internal/service/emby/preheat.go`) — body closed unread; WARN only
+  for {未送达, 错误响应码} (「预热请求发送失败」/「预热请求失败」); sent-but-timeout is INFO
+  「已触发（响应超时，节点侧预取不受影响）」. Signed URLs stay redacted in every branch.
+
 ## 4. Validation & Error Matrix
 
 | Situation | Status | Code / behavior |
@@ -313,7 +341,11 @@ Deployment boundaries:
   `enable:false` byte-identical. Runs `-count=2 -race`; use unique gdPaths (the gdrive cache is
   process-global).
 - `agent/` module — `go test -race ./...`: margin assertion, signature rejection matrix (incl.
-  `e == now`), handler 503 gate, link-cache singleflight, two-hop header test, disconnect cancels upstream.
+  `e == now`), handler 503 gate, link-cache singleflight, two-hop header test, disconnect cancels
+  upstream. v0.3.2 prefetch: first-block-ready strictly before stream end (slow-drip fixture),
+  yield timeline (no new bytes land while a client is active), resume request-count exactness,
+  misaligned-start drop, 401-refresh-once on the prefetch path. Mutation-verified: removing any of
+  the 8 covered behaviors turns its test red.
 
 ## 7. Wrong vs Correct
 
@@ -367,3 +399,17 @@ logs.Info("enroll: %s", agentSecret)         // credential in logs
 so spoofing can only misdirect one's *own* node address; NAT nodes must pass `--public-url`.
 Compare with `cryptos.Equal`; generate with `cryptos.RandomHex(32)`; credentials and signed URLs
 never reach logs (logging-guidelines.md).
+
+#### Wrong — per-block Range loop for prefetch
+
+```go
+// 8×4 MiB head blocks as 8 independent Range requests: each pays Google's ~1s init;
+// measured 26–30s per episode's head+tail on a slow node line
+```
+
+#### Correct — one stream, sliced on arrival
+
+```go
+// single `Range: bytes=0-(head-1)`, Put each filled 4 MiB block immediately;
+// block 0 ready in seconds (smoke: 527 ms incl. one yield poll), full head+tail = 2 requests
+```

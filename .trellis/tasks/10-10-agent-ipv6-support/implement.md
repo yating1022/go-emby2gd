@@ -1,16 +1,18 @@
 # implement：agent IPv6 客户端接入（顺序清单）
 
-> 主模块为主；**agent 侧零代码改动**（只可能改安装脚本）。`export PATH=$PATH:/usr/local/go/bin`；不 commit。
-> ⚠️ 文件边界：不要碰 `agent/internal/proxy/handler.go` 与 `handler_cache_test.go`（并行任务 v2 正在那里工作）。
-> 范围修订（2026-10-10）：取消 UPSTREAM_* 配置键与拨号改造（出站保持现状）。
+> 主模块为主；**agent 侧零代码改动**。`export PATH=$PATH:/usr/local/go/bin`；不 commit。
+> 状态（2026-10-10）：S1–S3 + 独立检查完成。master 侧纯补测（v6 用例含独立 HMAC 复算）；
+> 安装脚本幂等路径 `--public-url`（锚定 sed + 原子替换 + 失败不动文件）；沙盒用例 5 组。
+> **检查自修 1 类缝隙**：预检与 master 校验的 4 处差异（userinfo/`?#`/方括号未闭合/裸 v6）
+> 均已主动拒绝（裸 v6 更严并给出正确写法）；spec §3.8/§3.10/§6 同步。
+> 出站（S1/S2 原计划）已按用户范围修订**全部撤销**（上游四文件与基线逐字节 SAME）。
+> 待办：S4 真机 v6 验证（随 v0.3.1 发布执行）。
 
-- [ ] S1 master 侧补测（生产代码零改动）：`parsePublicBaseURL` v6（带端口/无端口/非法）；
-      `agentBaseURL` v6 `LastIP`；`sign.go` v6 基址签名全链
-- [ ] S2 `internal/service/agentnet/installshell/agent-install.sh`：幂等路径 `--public-url`
-      锚定替换 `PUBLIC_BASE_URL`（失败不改文件）→ 重启 → 打印；帮助文本补 v6 示例；沙盒用例
-- [ ] S3 测试对照：`go test ./internal/...`（既有 5 失败包原样）+ `-race` 相关包 + gofmt/vet
-- [ ] S4（随发布）真机：v6 节点设置 → 节点页 v6 地址 → 客户端 307 v6 → 拉流成功；spec 补 v6 小节
+- [x] S1 master 侧补测（生产代码零改动）：`parsePublicBaseURL` v6、`agentBaseURL` v6 `LastIP`、`sign.go` v6 基址签名全链（独立 HMAC 复算）
+- [x] S2 安装脚本：幂等路径 `--public-url` 锚定替换 + 预检（对齐 master 规则）+ 帮助文本 v6 示例；沙盒用例
+- [x] S3 测试对照：全量对照基线（既有 5 失败包原样）+ `-race` 相关包 + gofmt/vet/`bash -n`
+- [x] S4（随发布）真机：Zouter 配置 v6 → master Address 为 v6 → v6 直连 12MB/s；spec 已补 v6 小节（§3.8/§3.10/§6）
 
 ## 回滚点
 
-- 生产代码无改动；脚本替换单行可逆（改回旧值或删行即回默认推导）；随 v0.3.1 发布。
+- 生产 Go 代码零改动；脚本替换单行可逆（改回旧值即回默认推导）；随 v0.3.1 发布。

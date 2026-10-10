@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/agent-network.md", "reason": "核对部署后协议与注册状态（role=hub、不参与调度、心跳新鲜）"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "核对验证矩阵的执行性：判据可判、数字可对照、演练有原始输出"}

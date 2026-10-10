@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/agent-network.md", "reason": "核对协议零变更与日志规范（流式预取的新日志不得含密钥/签名）"}
+{"file": ".trellis/spec/backend/http-proxy.md", "reason": "核对单条流/让路未破坏上游客户端既有契约"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "核对测试有效性（早熟/让路/续取的时间线与计数断言不可自证）"}

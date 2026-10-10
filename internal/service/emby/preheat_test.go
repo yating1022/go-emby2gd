@@ -590,6 +590,9 @@ func TestPreheat_NoNodeWarnsAndSkips(t *testing.T) {
 // 签名参数 —— "节点不可达 / 超时"正是失败日志最常见的场景, 直接回显错误就等于
 // 把签名写进日志(agent-network.md §3.7)。这里让节点的对外地址指向一个必然
 // 拒绝连接的端口, 强制走失败分支。
+//
+// 分级语义(design §2.4): 请求未送达(dial 类错误)是预热唯一的真失败, 记 WARN
+// 「预热请求发送失败」; 已送达后的响应超时不再是失败(见 TestPreheat_BodyNotReadTriggeredQuickly)。
 func TestPreheat_ProbeFailureLogsWithoutSignature(t *testing.T) {
 	gdPath := uniqueGDPath("/影视库/预热/不可达.mkv")
 	origin := newPreheatEmbyOrigin(t, "/home/googleDrive"+gdPath, "Movie")
@@ -607,7 +610,7 @@ func TestPreheat_ProbeFailureLogsWithoutSignature(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("预热失败不得影响主流程, 响应码 = %d", recorder.Code)
 	}
-	waitForLog(t, logger, "[网关预热] 预热请求失败")
+	waitForLog(t, logger, "[网关预热] 预热请求发送失败")
 
 	collected := logger.String()
 	if strings.Contains(collected, "/dl/") || strings.Contains(collected, "&s=") {
@@ -615,6 +618,12 @@ func TestPreheat_ProbeFailureLogsWithoutSignature(t *testing.T) {
 	}
 	if !strings.Contains(collected, "请求节点失败") {
 		t.Errorf("失败原因应保留(只抹掉地址本身), 实际: %s", collected)
+	}
+	if !strings.Contains(collected, "[WARN]") {
+		t.Errorf("请求未送达是真失败, 应记 WARN 级, 实际: %s", collected)
+	}
+	if strings.Contains(collected, "已触发") {
+		t.Errorf("请求未送达不得记已触发, 实际: %s", collected)
 	}
 }
 
@@ -681,4 +690,67 @@ func TestPreheat_NonMountPathSilentAndNoProbe(t *testing.T) {
 	if logger.contains("[网关预热]") {
 		t.Errorf("非挂载路径属于正常情况, 不应留下预热日志, 实际: %s", logger.String())
 	}
+}
+
+// TestPreheat_BodyNotReadTriggeredQuickly 响应头一到即判定"已触发", 不等响应体
+//
+// 修复的假告警场景: 节点收到预热请求并开始首触预取, 但响应体迟迟不送达(节点忙于
+// 拉数据 / 连接被限速)。旧实现读完 body 才算成功, 于是把一次完全成功的触发记成
+// WARN「预热请求失败」—— 实测日志里的假告警。触发语义在请求送达时已经达成, 新
+// 实现拿到响应头就关闭 body 返回。
+//
+// 用例手法: 假 agent 先写 206 响应头并 Flush, 之后扣住 body 不放。等到「已触发」
+// 日志出现时 body 仍被扣着 —— 旧实现此刻还卡在读 body 上, 只能等到 8s 超时再记
+// 假告警, 必然失败; 新实现在响应头到达后立刻返回。
+func TestPreheat_BodyNotReadTriggeredQuickly(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enteredOnce, releaseOnce sync.Once
+	releaseBody := func() { releaseOnce.Do(func() { close(release) }) }
+
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/x-matroska")
+		w.WriteHeader(http.StatusPartialContent)
+		if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+		}
+		enteredOnce.Do(func() { close(entered) })
+		<-release // 扣住响应体: 触发语义已完成, 实现不应再等它
+	}))
+	// 注册顺序即执行顺序的反向: 先注册 Close(后执行), 再注册释放体(先执行);
+	// 反过来的话 Close 会一直等这个被扣住的 handler 返回
+	t.Cleanup(agent.Close)
+	t.Cleanup(releaseBody)
+
+	gdPath := uniqueGDPath("/影视库/预热/扣体.mkv")
+	origin := newPreheatEmbyOrigin(t, "/home/googleDrive"+gdPath, "Movie")
+
+	basePath := prepareAgentStateDir(t, `{"version":1,"agents":[`+preheatAgentEntryJSON(agent.URL)+`]}`)
+	agentCfg := mustAgentConfig(t, "enable: true\nenroll-token: test-enroll-token-0123456789\n")
+	withPreheatTestConfig(t, origin.server.URL, "http://panel.invalid", agentCfg, basePath)
+	heartbeatTestAgent(t, 0)
+
+	logger := captureRedirectLogs(t)
+	c, recorder := newRedirectContext(t, "/emby/Items/123/PlaybackInfo?api_key=test-key")
+	emby.TransferPlaybackInfo(c)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("预热不得影响主流程, 响应码 = %d", recorder.Code)
+	}
+
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("假 agent 没有收到预热请求")
+	}
+
+	// 关键断言: body 仍被扣住, 此刻必须已经能看到"已触发:"(触发级日志)
+	waitForLog(t, logger, "[网关预热] 已触发:")
+
+	collected := logger.String()
+	if strings.Contains(collected, "[WARN]") {
+		t.Errorf("响应体未读不应产生 WARN(假告警), 实际: %s", collected)
+	}
+
+	releaseBody()
 }
