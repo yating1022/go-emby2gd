@@ -4,7 +4,8 @@
 //	master（发 hub 直链、headers 为空）→ node /dl/ → hub /f/<fileID> → Google
 //
 // 覆盖：未 warm → 409；warm 区域集 → 块 0 本地供流 + 跨块 Range 字节一致；
-// 透传同步落盘 → 全命中（hub 与 Google 断开后仍供流）。
+// 透传同步落盘 → 全命中（hub 与 Google 断开后仍供流）；后缀区间 bytes=-N →
+// node 原样透传、hub 收窄为 [size-N, size-1] 后本地全命中。
 // 凭据流向对偶断言（S6 所在）：
 //   - hub → Google 的每一条请求都带 warm 凭据（且至少发生过回源）；
 //   - node → hub 的每一条请求都不带任何凭据（master 对 hub 链路下发空 headers）。
@@ -34,16 +35,19 @@ import (
 // e2eBlock 是冻结的 4MiB 块尺寸（协议值，改它会破坏字节一致性）。
 const e2eBlock = int64(4 << 20)
 
-// hubRecorder 包住 hub handler，记录进入 hub 的请求头（S6 证据用）。
+// hubRecorder 包住 hub handler，记录进入 hub 的请求头（S6 证据用；Range 用于
+// ⑦ 的"node 原样透传后缀"断言）。
 type hubRecorder struct {
-	next  http.Handler
-	mu    sync.Mutex
-	auths []string
+	next   http.Handler
+	mu     sync.Mutex
+	auths  []string
+	ranges []string
 }
 
 func (r *hubRecorder) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.mu.Lock()
 	r.auths = append(r.auths, req.Header.Get("Authorization"))
+	r.ranges = append(r.ranges, req.Header.Get("Range"))
 	r.mu.Unlock()
 	r.next.ServeHTTP(w, req)
 }
@@ -52,6 +56,12 @@ func (r *hubRecorder) snapshotAuth() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.auths...)
+}
+
+func (r *hubRecorder) snapshotRanges() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.ranges...)
 }
 
 func TestHubE2ENodeHubGoogle(t *testing.T) {
@@ -250,6 +260,23 @@ func TestHubE2ENodeHubGoogle(t *testing.T) {
 	resp, body = nodeGET("bytes=1000-1999")
 	if resp.StatusCode != http.StatusPartialContent || !bytes.Equal(body, content[1000:2000]) {
 		t.Fatalf("断网命中不符：status=%d bytes=%d", resp.StatusCode, len(body))
+	}
+
+	// --- ⑦ 后缀区间 bytes=-64（F2）：node 原样透传、hub 收窄为 [size-64, size-1]
+	//     并本地全命中。Google 仍断着：若 hub 试图回源必失败，能给出正确字节
+	//     本身就证明"后缀由 hub 解析、本地供流"。
+	resp, body = nodeGET("bytes=-64")
+	if resp.StatusCode != http.StatusPartialContent || !bytes.Equal(body, content[size-64:]) {
+		t.Fatalf("后缀区间不符：status=%d bytes=%d", resp.StatusCode, len(body))
+	}
+	if got, want := resp.Header.Get("Content-Range"), fmt.Sprintf("bytes %d-%d/%d", size-64, size-1, size); got != want {
+		t.Fatalf("后缀区间 Content-Range = %q，应 %q", got, want)
+	}
+	// node → hub 的 Range 必须仍是原样的 `bytes=-64`：node 侧零改动（不展开、不
+	// 改写成确定区间），后缀由 hub 解析——两者分工的 HTTP 边界证据。
+	ranges := rec.snapshotRanges()
+	if len(ranges) == 0 || ranges[len(ranges)-1] != "bytes=-64" {
+		t.Fatalf("node→hub 的 Range 应为原样后缀 bytes=-64，实际 %v", ranges)
 	}
 
 	// --- 凭据流向（S6）：node→hub 全程无凭据；hub→Google 全程带 warm 凭据 ---

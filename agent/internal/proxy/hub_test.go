@@ -85,7 +85,9 @@ func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(payload)
 		return
 	}
-	rng, ok := parseByteRange(r.Header.Get("Range"))
+	// 用与生产同一套 size 感知解析：常规/open-ended 原语义不变，后缀区间
+	// bytes=-N 按 RFC 映射为 [max(0,size-N), size-1]（N=0 仍是 416）。
+	rng, ok := parseByteRangeSized(r.Header.Get("Range"), int64(len(payload)))
 	if !ok {
 		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 		return

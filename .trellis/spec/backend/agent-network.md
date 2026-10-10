@@ -324,7 +324,18 @@ timeout mid-fill).
 with **zero egress** (no link needed), partial → prefix-first mixed, miss → upstream tee, each
 filled 4MiB block Put synchronously while streaming. Node → hub carries **no** Authorization
 (link payload for hub carries `headers:{}`); hub → Google carries the warm credential. HEAD passes
-through uncached.
+through uncached. **Suffix ranges** (`bytes=-N`) are parsed **at the hub** against the known size
+(v0.4.1): `[size-N, size-1]` (N≥size → whole file; N=0 → forwarded verbatim, 416 semantics from
+origin); the node relays suffixes verbatim, so a cached suffix serves locally with no upstream
+request at all (previously it fell through to Google and could stall 30s on the
+Twon→googleapis flaky path).
+
+**Node relay hardening** (v0.4.1): an upstream **connection-level failure** (dial/refused/DNS/RST
+— no HTTP response) in the passthrough or mixed path triggers **exactly one link Refresh + one
+retry**; header/dial timeouts and context cancellation do **not** trigger (no double waits). This
+is what makes "hub down → fall back to Google" take effect within one request instead of waiting
+for the cached link's ~1h expiry; the retry is counted (dead address dialed exactly once, never
+retried as-is) and log redaction still holds (no URLs in logs).
 
 **Disk cache** (`DISK_CACHE_DIR`, on the big disk): `<dir>/<hash[:2]>/<hash>/{meta.json,<idx>.blk}`,
 temp+rename, identity chain per §3.11, lazy 48h TTL (`CACHE_MAX_AGE_MINUTES=2880`) + 10-min sweep,

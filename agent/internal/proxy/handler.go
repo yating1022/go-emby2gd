@@ -15,10 +15,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -184,8 +187,20 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, fileID string) i
 	}
 
 	resp, err := h.doUpstream(ctx, r, link)
+	if err != nil && isConnectionError(err) {
+		// 连接级失败（v0.4.1 F1）：上游地址不可达（hub 停机 → connection refused 最典型），
+		// 旧直链原样重试必然同样失败；换链（master 据此回退直链或换 hub）才可能恢复。
+		// 复用 401/403 的同一条 Refresh 通道，仍只重试一次。
+		h.log.Warn("连接上游失败，重拉直链后重试一次",
+			"file_id", fileID, "error", upstreamErrorText(err))
+		refreshed, rerr := h.cfg.Links.Refresh(ctx, fileID)
+		if rerr != nil {
+			return h.writeLinkError(w, fileID, rerr)
+		}
+		resp, err = h.doUpstream(ctx, r, refreshed)
+	}
 	if err != nil {
-		h.log.Error("连接上游失败", "file_id", fileID, "error", err)
+		h.log.Error("连接上游失败", "file_id", fileID, "error", upstreamErrorText(err))
 		writeError(w, http.StatusBadGateway, "AGENT_UPSTREAM_ERROR",
 			fmt.Sprintf("连接上游失败：%v", err), nil)
 		return http.StatusBadGateway
@@ -201,7 +216,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, fileID string) i
 		}
 		resp, err = h.doUpstream(ctx, r, refreshed)
 		if err != nil {
-			h.log.Error("连接上游失败", "file_id", fileID, "error", err)
+			h.log.Error("连接上游失败", "file_id", fileID, "error", upstreamErrorText(err))
 			writeError(w, http.StatusBadGateway, "AGENT_UPSTREAM_ERROR",
 				fmt.Sprintf("连接上游失败：%v", err), nil)
 			return http.StatusBadGateway
@@ -245,6 +260,48 @@ func (h *Handler) doUpstream(ctx context.Context, r *http.Request, link Link) (*
 		return nil, err
 	}
 	return h.client.Do(req)
+}
+
+// isConnectionError 判定上游请求错误是否属于"连接级失败"：请求根本没有得到任何
+// HTTP 响应（拨号被拒 / 网络不可达 / 主机不可达 / 解析失败等）。
+//
+// 只有这一类失败值得换链重试（v0.4.1 F1）：旧直链指向的地址不可达时，原样重试
+// 必然同样失败，只有向 master 换链（master 据此回退直链或换 hub）才可能恢复。
+// 超时（含 ResponseHeaderTimeout）与客户端取消**不**触发——前者重试只会双倍等待，
+// 后者是客户端自己走了。响应体读取中断不在此列（那时已拿到 HTTP 响应头）。
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return false
+	}
+	// 拨号阶段失败：一个字节都没发出去（拒绝 / 不可达 / 解析失败都在这里）。
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return true
+	}
+	// 兜底：报文往返前连接被拒 / 被重置 / 被中止（跨平台、跨包裹形态的等价错误）。
+	return errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETUNREACH)
+}
+
+// upstreamErrorText 提取上游请求错误的底层原因（如 `dial tcp 1.2.3.4:8791:
+// connect: connection refused`），丢掉 *url.Error 里包着的那条完整上游 URL：
+// 直链可能带签名参数，日志铁律不允许签名/密钥进日志（冻结稿 §3.7/§3.12）。
+func upstreamErrorText(err error) string {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		return urlErr.Err.Error()
+	}
+	return err.Error()
 }
 
 // --- 读前缓存的服务三态（design §4） -----------------------------------------
@@ -333,6 +390,19 @@ func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, fileID str
 	}
 
 	resp, err := h.doUpstreamRange(r.Context(), link, start+n, end)
+	if err != nil && isConnectionError(err) {
+		// 连接级失败（v0.4.1 F1）：与透传路径、下方 401/403 分支同一语义——旧链指向
+		// 的地址不可达（hub 停机 → connection refused），换链一次并重试一次；前缀
+		// 已写出无法回退，但重试成功就能把余段补齐，长播放不再因 hub 抖动中断。
+		h.log.Warn("混合服务：连接上游失败，重拉直链后重试一次",
+			"file_id", fileID, "error", upstreamErrorText(err))
+		refreshed, rerr := h.cfg.Links.Refresh(r.Context(), fileID)
+		if rerr != nil {
+			return h.abortMixed(fileID, "混合服务：重拉直链失败，断开连接（前缀已写出，无法回退）",
+				"error", rerr)
+		}
+		resp, err = h.doUpstreamRange(r.Context(), refreshed, start+n, end)
+	}
 	if err != nil {
 		return h.abortMixed(fileID, "混合服务：上游请求失败，断开连接（前缀已写出，无法回退）",
 			"error", err)
@@ -464,6 +534,40 @@ func parseByteRange(header string) (byteRange, bool) {
 		end = parsed
 	}
 	return byteRange{start: start, end: end}, true
+}
+
+// parseByteRangeSized 在**已知文件总大小**时解析单区间 Range：除 bytes=<start>-<end?>
+// 外还接受后缀形态 bytes=-N（RFC 9110 suffix-byte-range-spec），映射为 [size-N, size-1]：
+//   - N >= size → 整个文件 [0, size-1]；
+//   - N == 0 或解析失败 → ok=false（非法区间，由调用方原样透传，上游按其 416 语义处理）。
+//
+// 只给 hub 的 /f/ 用（v0.4.1 F2）：hub 已知 size，能把后缀收窄成确定区间后走三态
+// 服务（本地命中即不出网）。node 侧保持"后缀区间原样透传"的现状语义——后缀由 hub
+// 解析，node 不需要、也不应该自己展开（任务 10-10-hub-v041-fixes 的既定边界）。
+func parseByteRangeSized(header string, size int64) (byteRange, bool) {
+	if rng, ok := parseByteRange(header); ok {
+		return rng, true
+	}
+	if size <= 0 {
+		return byteRange{}, false
+	}
+	spec, found := strings.CutPrefix(header, "bytes=")
+	if !found {
+		return byteRange{}, false
+	}
+	spec = strings.TrimSpace(spec)
+	if strings.Contains(spec, ",") || !strings.HasPrefix(spec, "-") {
+		return byteRange{}, false
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(spec[1:]), 10, 64)
+	if err != nil || n <= 0 {
+		return byteRange{}, false
+	}
+	start := size - n
+	if start < 0 {
+		start = 0 // N >= size：整个文件
+	}
+	return byteRange{start: start, end: size - 1}, true
 }
 
 // responseMeta 解析上游响应里与缓存有关的元数据（身份链、总长、拼头字段）。

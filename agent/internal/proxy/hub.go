@@ -412,7 +412,11 @@ func (h *Hub) serveCachedDisk(w http.ResponseWriter, r *http.Request, fileID str
 	if identity == "" {
 		return 0, false
 	}
-	rng, ok := parseByteRange(r.Header.Get("Range"))
+	// 后缀区间 bytes=-N（v0.4.1 F2）：size 已知时收窄为 [size-N, size-1]（N>=size →
+	// 整个文件；N=0 → 解析失败，原样透传交上游按其 416 语义处理），此后与常规
+	// 区间一样走三态服务——缓存命中即可本地供流。size 未知的路径根本走不到这里
+	// （上面 meta.size<=0 已返回），维持"透传上游"的现状。
+	rng, ok := parseByteRangeSized(r.Header.Get("Range"), meta.size)
 	if !ok {
 		return 0, false
 	}

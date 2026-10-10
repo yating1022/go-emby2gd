@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/agent-network.md", "reason": "§3.11/§3.12 冻结语义：401/403 换链、三态服务、/f/ 契约——本修复在其语义内扩展（连接级失败换链、后缀解析）"}
+{"file": ".trellis/spec/backend/http-proxy.md", "reason": "出站请求与流式读取契约：连接级错误分类与重试不得破坏既有头/流语义"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "测试与验收口径（请求计数断言、负向验证、对照式、禁 commit）"}
