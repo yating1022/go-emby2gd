@@ -21,6 +21,8 @@ const defaultListenPort = 8790
 // schedule 选出一个可调度节点
 //
 // 候选条件(缺一不可):
+//   - 角色为 node: hub 是缓存中心, 【永不参与客户端调度】(与 priority 等
+//     其它条件无关的硬隔离, 本函数是唯一的客户端选点口);
 //   - Enabled: 管理员没有禁用(两种策略下都生效);
 //   - 心跳在 offline 窗口内: LastSeenAt 为零(从未心跳)视为离线,
 //     心跳消失即出池(高优先级节点离线后自然顺位下推), 恢复即回池;
@@ -40,6 +42,10 @@ func (r *registry) schedule(now time.Time, offline time.Duration, strategy strin
 	r.mu.RLock()
 	candidates := make([]*agentRecord, 0, len(r.records))
 	for _, rec := range r.records {
+		// 空值等价于 node(注册与加载两个入口都已归一化, 这里是兜底)
+		if rec.Role == RoleHub {
+			continue
+		}
 		if !rec.Enabled {
 			continue
 		}

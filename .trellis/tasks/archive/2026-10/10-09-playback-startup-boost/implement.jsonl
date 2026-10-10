@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/agent-network.md", "reason": "Release 资产名/安装脚本/systemd 路径的发布契约——I2 发布与 I3 节点升级的依据"}
+{"file": ".trellis/spec/backend/gdrive-panel.md", "reason": "I5 验收链路的直链与余量不变量（面板 token 1h / refresh margin）"}

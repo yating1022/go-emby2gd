@@ -78,6 +78,10 @@ type enrollRequest struct {
 	Version       string  `json:"version"`
 	ListenPort    int     `json:"listen_port"`
 	PublicBaseURL *string `json:"public_base_url"`
+	// Role 节点角色(node / hub), 可缺省
+	//
+	// 缺省 = node, 保证 v0.3.2 及更早的节点(不带该字段)注册行为逐字不变。
+	Role string `json:"role"`
 }
 
 // Enroll 处理 POST /api/agent/enroll
@@ -115,6 +119,16 @@ func Enroll(c *gin.Context) {
 		return
 	}
 
+	// 角色可选: 缺省 node(向后兼容 v0.3.2 节点), 只接受协议里冻结的两个取值
+	role := strings.TrimSpace(req.Role)
+	if role == "" {
+		role = RoleNode
+	}
+	if _, ok := validAgentRoles[role]; !ok {
+		writeError(c, http.StatusBadRequest, codeValidationError, "role 取值不合法, 有效值: node, hub")
+		return
+	}
+
 	publicBaseURL := ""
 	if req.PublicBaseURL != nil {
 		normalized, err := parsePublicBaseURL(*req.PublicBaseURL)
@@ -132,6 +146,7 @@ func Enroll(c *gin.Context) {
 		Version:       strings.TrimSpace(req.Version),
 		ListenPort:    req.ListenPort,
 		PublicBaseURL: publicBaseURL,
+		Role:          role,
 		LastIP:        c.ClientIP(),
 		Now:           time.Now(),
 	})
@@ -272,6 +287,27 @@ func DownloadLink(c *gin.Context) {
 		logf(colors.Yellow, "向节点 %s(%s) 下发直链失败: %v", rec.Name, rec.ID, err)
 		writeError(c, http.StatusBadGateway, codeLinkUnavailable, err.Error())
 		return
+	}
+
+	// hub 链路改写: warm 被接受时把节点的上游指向 hub 的内网口(不带凭据),
+	// 否则保持现状(Google 直链 + 凭据) —— 回退链是硬要求, 改写失败绝不报错。
+	//
+	// 【hub 角色自身除外】: hub 换新链(直链约 1h 过期)走的正是本接口,
+	// 若把 hub 的请求也改写成 hub 自己的地址, hub 会拿到一个指回它自己的
+	// "上游"、永远换不到 Google 新链(自指死循环), 因此 hub 只拿真正的直链。
+	if rec.Role != RoleHub {
+		if hubURL, ok := hubUpstreamFor(c.Request.Context(), gdPath, url, headers); ok {
+			logf(colors.Green, "已向节点 %s(%s) 下发 hub 上游: file_id=%s, 文件: %s",
+				rec.Name, rec.ID, driveFileIDFromDirectLink(url), gdPath)
+			c.JSON(http.StatusOK, gin.H{
+				"url": hubURL,
+				// 无 auth 字段: hub 数据面在内网白名单内明文服务, 不需要 Google 凭据;
+				// 节点侧对空 headers 不会附任何凭据(链路参数决定, 节点零改动)
+				"headers":    map[string]string{},
+				"expires_at": expiresAt,
+			})
+			return
+		}
 	}
 
 	logf(colors.Green, "已向节点 %s(%s) 下发直链, 文件: %s", rec.Name, rec.ID, gdPath)

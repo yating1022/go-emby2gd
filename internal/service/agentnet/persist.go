@@ -45,6 +45,9 @@ type agentFileEntry struct {
 	ListenPort    int    `json:"listen_port"`
 	Version       string `json:"version"`
 	LastIP        string `json:"last_ip"`
+	// Role 节点角色(node / hub); omitempty 与语义一致:
+	// 缺省角色 node 不写, 旧文件没有该字段时也按 node 处理。
+	Role string `json:"role,omitempty"`
 	// Priority 调度优先级(越小越优先); omitempty 与语义一致:
 	// 缺省值 0 就是"未设置 = 最优先", 旧文件没有该字段时也按 0 处理。
 	Priority  int       `json:"priority,omitempty"`

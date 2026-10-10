@@ -315,3 +315,40 @@ func TestInstallScript_IdempotentWithoutPublicURLKeepsConfigUntouched(t *testing
 		t.Error("未给 --public-url 时不应重写 config.env（文件本体已被更换）")
 	}
 }
+
+// TestInstallScript_RoleFlagAcceptedOnUpgradeWithNotice
+//
+// --role 在升级路径上必须被接受（解析/校验通过）但**不改变** config.env——角色只在
+// 首次注册（enroll）时写进注册请求；升级路径只打印提示。非法取值必须在预检拦下，
+// 且失败后文件逐字节不变（与 --public-url 同一失败契约）。
+func TestInstallScript_RoleFlagAcceptedOnUpgradeWithNotice(t *testing.T) {
+	sb := setupInstallSandbox(t, sandboxConfigBody)
+	before := sb.readConfig(t)
+
+	out, err := sb.run(t, "--role", "hub")
+	if err != nil {
+		t.Fatalf("升级路径给 --role hub 应被接受，实际失败：%v\n%s", err, out)
+	}
+	if !strings.Contains(out, "--role 仅在首次注册") {
+		t.Errorf("应提示角色只在首次注册生效，实际输出：\n%s", out)
+	}
+	if after := sb.readConfig(t); after != before {
+		t.Errorf("升级路径 --role 不应改动 config.env：\n改动前 %q\n改动后 %q", before, after)
+	}
+
+	t.Run("非法取值", func(t *testing.T) {
+		sb := setupInstallSandbox(t, sandboxConfigBody)
+		before := sb.readConfig(t)
+
+		out, err := sb.run(t, "--role", "center")
+		if err == nil {
+			t.Fatalf("非法 --role 应被预检拦下，实际输出：\n%s", out)
+		}
+		if !strings.Contains(out, "--role") {
+			t.Errorf("失败信息应点名 --role，实际：\n%s", out)
+		}
+		if after := sb.readConfig(t); after != before {
+			t.Errorf("失败后文件不应被改动：\n改动前 %q\n改动后 %q", before, after)
+		}
+	})
+}

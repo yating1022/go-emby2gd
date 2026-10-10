@@ -74,4 +74,14 @@ func TestConfigExample_Loadable(t *testing.T) {
 	if !config.C.AgentNetwork.PreheatEnabled() {
 		t.Error("配置示例文件的 agent-network.preheat-enable 应默认为 true")
 	}
+	// hub 接入: 示例文件必须把三个键写全, 且缺省关闭(不改变任何既有行为)
+	if config.C.AgentNetwork.HubEnabled() {
+		t.Error("配置示例文件的 agent-network.hub-enable 应默认为 false")
+	}
+	if got := config.C.AgentNetwork.HubPort(); got != 8791 {
+		t.Errorf("配置示例文件的 agent-network.hub-port = %d, want 8791", got)
+	}
+	if got := config.C.AgentNetwork.HubWarmTimeout(); got != 3*time.Second {
+		t.Errorf("配置示例文件的 agent-network.hub-warm-timeout = %v, want 3s", got)
+	}
 }

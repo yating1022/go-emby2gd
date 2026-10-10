@@ -70,9 +70,11 @@ const (
 // 与 agentRecord 的差别就是【脱敏】: 绝不包含 secret / sign_key 与
 // 任何 Google 凭据 —— 节点列表会渲染在网页上, 那里不是凭据该出现的地方。
 type agentView struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	MachineID     string `json:"machine_id"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	MachineID string `json:"machine_id"`
+	// Role 节点角色(node / hub): hub 不参与客户端调度, 页面上需要能一眼区分
+	Role          string `json:"role"`
 	Enabled       bool   `json:"enabled"`
 	Online        bool   `json:"online"`
 	Priority      int    `json:"priority"`
@@ -303,6 +305,7 @@ func newAgentView(rec *agentRecord, now time.Time, offline time.Duration) agentV
 		ID:            rec.ID,
 		Name:          rec.Name,
 		MachineID:     rec.MachineID,
+		Role:          normalizeRole(rec.Role),
 		Enabled:       rec.Enabled,
 		Online:        online,
 		Priority:      rec.Priority,

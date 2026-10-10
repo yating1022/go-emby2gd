@@ -60,3 +60,52 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: v0.3.2 发布上线 + hub（大盘鸡缓存中心）开工
+
+**Date**: 2026-10-10
+**Task**: v0.3.2 发布上线 + hub（大盘鸡缓存中心）开工
+**Branch**: `main`
+
+### Summary
+
+v0.3.2 全链闭环（发布/升级/真链复测 requests=2、探测 0.36s）；hub 任务树激活、双实现代理进行中；后缀区间绕缓存登记为可选增强
+
+### Main Changes
+
+## v0.3.2（预取流式化与让路）闭环
+
+- 检查通过：另发现并修复 1 个字节一致性边界（非块对齐起点弃流），补 2 个回归测试；变异验证 8/8 目标用例全红（测试真实有效）。
+- 发布：fork 快照 `dda7e73` → tag `agent-v0.3.2` → Actions（vet + go test -race 门）通过 → Release 三资产。（注：首次误推 tag 指向旧 commit，即刻删 tag，`--verify-tag` 挡住误发布，无污染。）
+- 四节点（VIMESS/酷网云/家人云/Zouter）升级 0.3.2，服务 active。
+- 真链复测（NAS vantage，E01/E02 实测）：
+  - **requests=2**（头单流 + 尾一条）；首块就绪约 2.1s（含让路等待）；让路/恢复精确（客户端在途即暂停、结束即恢复）。
+  - 热探测 TTFB 0.36–0.39s（与 v0.3.1 下限持平）；冷探测 2.6s（面板解析 + Google 初始化）。
+  - 发现：后缀区间 `bytes=-N` 不经缓存（`parseByteRange` 明确不接受，走纯透传）。**真实播放器（iPhone/Lenna）从不发后缀形态**（实测其探测 = `0-65535`、`0-`、中段偏移开区间），影响为零；登记为可选增强。
+  - 尾部块落盘正确（blocks 计数与区间算术吻合；开区间形态可命中）。
+- 探测方法沉淀：用 agents.json 的 sign_key + 冻结签名格式本机铸 URL（零转写：中转文件服务 → NAS `$(curl)` 取用）——后续真链测量复用。
+- 归档 6 个任务：prefetch-stream-yield、gateway-preheat、agent-readahead-cache、mixed-serve-prefix-first、agent-ipv6-support、父任务 playback-startup-boost。
+
+## hub（大盘鸡缓存中心）开工
+
+- 讨论收敛 + 用户全权授权（规划→开发→部署→测试，直推到「用户可手动播放测试」；无需逐段授权）。部署硬性要求：缓存目录必须在 250G 数据盘 vdb1（/home），systemd `RequiresMountsFor=/home`。
+- 任务树 `10-10-cache-hub-center` 建好并激活（hub-agent-mode / hub-master-integration / hub-deploy-verify），设计冻结：`/f/<fileID>` 三态、`/warm`+`/cancel`、播放探测全集预热（头+尾+续播点）、48h TTL + LRU 上限、多 A 记录快速失败拨号、role 多实例/多 hub 预留、hub 不可达回退直连。
+- 两个实现代理并行进行中（agent 侧 hub 模式；master 侧接入）。
+
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

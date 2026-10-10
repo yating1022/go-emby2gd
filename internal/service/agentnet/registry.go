@@ -147,8 +147,10 @@ type enrollParams struct {
 	Version       string
 	ListenPort    int
 	PublicBaseURL string
-	LastIP        string
-	Now           time.Time
+	// Role 节点角色(node / hub), 空串按缺省角色 node 处理
+	Role   string
+	LastIP string
+	Now    time.Time
 }
 
 // enrollResult 注册成功后下发给节点的凭据
@@ -182,6 +184,8 @@ func (r *registry) enroll(p enrollParams) (enrollResult, error) {
 	if name == "" {
 		name = p.MachineID
 	}
+	// 非法取值在接口层已拒绝, 这里只做归一化(空串 / 未知值 → node)
+	role := normalizeRole(strings.TrimSpace(p.Role))
 
 	var result enrollResult
 	err := r.mutate(func() func() {
@@ -196,6 +200,9 @@ func (r *registry) enroll(p enrollParams) (enrollResult, error) {
 			prev := rec.clone()
 			rec.Secret = secret
 			rec.SignKey = signKey
+			// Role 是部署上报值而不是管理员状态: 重装脚本(换代 / 从 node 改配成 hub)
+			// 要能刷新它, 否则改了 config.env 的 ROLE 重跑安装脚本也换不了角色。
+			rec.Role = role
 			rec.PublicBaseURL = p.PublicBaseURL
 			rec.ListenPort = p.ListenPort
 			rec.Version = p.Version
@@ -218,6 +225,7 @@ func (r *registry) enroll(p enrollParams) (enrollResult, error) {
 			Name:          name,
 			Secret:        secret,
 			SignKey:       signKey,
+			Role:          role,
 			PublicBaseURL: p.PublicBaseURL,
 			ListenPort:    p.ListenPort,
 			Version:       p.Version,

@@ -59,6 +59,7 @@ SERVICE_USER="gd-agent"
 MASTER=""
 TOKEN=""
 PUBLIC_URL=""
+ROLE=""
 PORT="8790"
 DOWNLOAD_BASE=""
 FORCE_ENROLL=0
@@ -78,6 +79,11 @@ gd-agent 安装脚本
                          重跑脚本时给出它 = 就地更新 config.env 的 PUBLIC_BASE_URL
                          行并重启服务（不重新注册、凭据不轮换）。
                          IPv6 节点示例：--public-url 'http://[2408:xxxx::1]:8790'
+  --role <node|hub>      运行角色（默认 node）。hub = 磁盘缓存中心：注册请求携带
+                         role=hub（master 侧永不把它编入客户端调度）；hub 的
+                         --port 需与 master 的 agent-network.hub-port 一致。
+                         ⚠️ 角色只在首次注册（enroll）时生效——升级路径给 --role
+                         不会改变既有角色；要改角色请加 --force-enroll。
   --port <端口>          数据面监听端口（默认 8790，非特权端口）
   --download-base <地址> 覆盖二进制下载源：http(s) 地址、本地目录或 file:// 目录
                          （本地联调 / 内网镜像用；不给则从 GitHub Release 直下）
@@ -146,6 +152,7 @@ while [[ $# -gt 0 ]]; do
     --master) MASTER="${2:-}"; shift 2 ;;
     --token) TOKEN="${2:-}"; shift 2 ;;
     --public-url) PUBLIC_URL="${2:-}"; shift 2 ;;
+    --role) ROLE="${2:-}"; shift 2 ;;
     --port) PORT="${2:-}"; shift 2 ;;
     --download-base) DOWNLOAD_BASE="${2:-}"; shift 2 ;;
     --force-enroll) FORCE_ENROLL=1; shift ;;
@@ -160,6 +167,13 @@ esac
 if ((PORT < 1 || PORT > 65535)); then
   fail "--port 超出范围（1-65535）：${PORT}"
 fi
+
+# --role 预检：空 = 缺省 node（与 enroll 的语义一致）；只接受 node / hub。
+# 非法值就地拦下，避免带进 enroll（那会得到一次注定失败的注册）。
+case "${ROLE}" in
+  '' | node | hub) ;;
+  *) fail "--role 取值不合法：${ROLE}（合法值：node、hub）" ;;
+esac
 
 # --public-url 预检：幂等路径会把它直接写进 config.env（没有 master 帮忙校验），
 # 坏值写进去 = 节点每个心跳都会被 master 400 拒绝，离线窗口（默认 45 秒）过后
@@ -359,6 +373,9 @@ NEED_ENROLL=1
 if [[ -f "${CONFIG_FILE}" && "${FORCE_ENROLL}" -eq 0 ]]; then
   NEED_ENROLL=0
   log "已存在配置 ${CONFIG_FILE}：按「只升级二进制」处理，不重新注册（要重新注册请加 --force-enroll）"
+  if [[ -n "${ROLE}" ]]; then
+    log "注意：--role 仅在首次注册（enroll）时生效；本次是升级路径，角色未改变（要改角色请加 --force-enroll）"
+  fi
 fi
 
 if [[ "${NEED_ENROLL}" -eq 1 ]]; then
@@ -372,6 +389,10 @@ if [[ "${NEED_ENROLL}" -eq 1 ]]; then
   ENROLL_ARGS=(enroll --master "${MASTER}" --token "${TOKEN}" --port "${PORT}" --config "${CONFIG_FILE}")
   if [[ -n "${PUBLIC_URL}" ]]; then
     ENROLL_ARGS+=(--public-url "${PUBLIC_URL}")
+  fi
+  # 角色只在注册请求里生效（hub 会携带 role=hub；node 不带，与旧版逐字节一致）。
+  if [[ -n "${ROLE}" ]]; then
+    ENROLL_ARGS+=(--role "${ROLE}")
   fi
   if ! "${BIN_PATH}" "${ENROLL_ARGS[@]}"; then
     fail "注册失败（master 未接受这次注册）。常见原因：

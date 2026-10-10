@@ -10,7 +10,7 @@
 
 ```
 hubFor(fileID) *agentRecord
-  健康 hub（心跳新鲜）按 (priority desc, id asc) 排序
+  健康 hub（心跳新鲜）按 (priority 升序〔数字越小越优先，与全项目调度语义一致〕, id 升序) 排序
   无 → nil；否则 hubs[hash(fileID) % len(hubs)]
 ```
 - 单 hub 恒等；确定性保证"同一文件永远选同一台"（warm 与播放取址一致，多 hub 时缓存单副本）。

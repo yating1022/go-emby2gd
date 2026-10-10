@@ -40,13 +40,16 @@ const signKeyBytes = 32
 const usageText = `gd-agent —— GD 代理网络节点
 
 用法：
-  gd-agent enroll --master <master地址> --token <注册Token> [--public-url <对外地址>] [--port 8790] [--config <路径>]
+  gd-agent enroll --master <master地址> --token <注册Token> [--role node|hub] [--public-url <对外地址>] [--port <监听端口>] [--config <路径>]
   gd-agent serve  [--config <路径>]
   gd-agent version
 
 说明：
   enroll   一次性注册（幂等：同一台机器重跑会轮换凭据并复用原节点记录）
-  serve    常驻服务：心跳 + 数据面代理；默认读 /etc/gd-agent/config.env
+  serve    常驻服务：心跳 + 数据面；默认读 /etc/gd-agent/config.env。
+           角色由配置里的 ROLE 决定：缺省 node（客户端拉流节点，端口 LISTEN_PORT=8790）；
+           hub = 磁盘缓存中心（端口 HUB_PORT=8791，"内网口"同时承载 /f/<fileID> 数据面
+           与 /warm、/cancel 控制面，访问控制为 HUB_ALLOW_IPS 白名单）。
 `
 
 func main() {
@@ -85,10 +88,15 @@ func runEnroll(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	master := fs.String("master", "", "master 地址（如 http://1.2.3.4:8000）")
 	token := fs.String("token", "", "注册 Token（master 网页「节点」页复制）")
+	role := fs.String("role", "", "运行角色：node（缺省）| hub（磁盘缓存中心）")
 	publicURL := fs.String("public-url", "", "本机对外地址（NAT 后必填，如 http://1.2.3.4:8790）")
-	port := fs.Int("port", config.DefaultListenPort, "数据面监听端口")
+	port := fs.Int("port", 0, "监听端口（缺省 node=8790、hub=8791）")
 	configPath := fs.String("config", config.DefaultPath, "配置文件写入路径")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if !config.ValidRole(*role) {
+		fmt.Fprintf(stderr, "--role 取值不合法：%q（合法值：node、hub）\n\n%s", *role, usageText)
 		return 2
 	}
 
@@ -99,6 +107,7 @@ func runEnroll(args []string, stdout, stderr io.Writer) int {
 	_, err := enroll.Run(ctx, enroll.Options{
 		MasterURL:     *master,
 		Token:         *token,
+		Role:          *role,
 		PublicBaseURL: *publicURL,
 		ListenPort:    *port,
 		ConfigPath:    *configPath,
@@ -126,6 +135,11 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "gd-agent serve 启动失败：%v\n", err)
 		return 1
+	}
+	// hub 角色走独立的服务装配（磁盘缓存 + /f/ 数据面 + /warm、/cancel 控制面）；
+	// node 角色的代码路径与 v0.3.2 完全一致（下面一字未动）。
+	if cfg.IsHub() {
+		return runServeHub(cfg, logger, stderr)
 	}
 	signKey, err := cfg.SignKeyBytes()
 	if err != nil {
@@ -213,6 +227,113 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 			"cache_max_age_minutes", cfg.CacheMaxAgeMinutes,
 			"prefetch_head_mb", cfg.PrefetchHeadMB,
 			"prefetch_tail_mb", cfg.PrefetchTailMB,
+		)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+	}()
+
+	code := 0
+	select {
+	case <-ctx.Done():
+		logger.Info("收到退出信号，开始优雅停机")
+	case err := <-errCh:
+		logger.Error("HTTP 服务异常退出", "error", err)
+		code = 1
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Warn("优雅停机超时，强制关闭", "error", err)
+		_ = server.Close()
+	}
+	logger.Info("gd-agent 已退出")
+	return code
+}
+
+// runServeHub 是 hub 角色的常驻服务（design 10-10-hub-agent-mode §1–§5）。
+//
+// 与 node 角色的差别：
+//   - 不挂客户端拉流路由（没有 /dl/，签名密钥不参与）：数据面是 /f/<fileID>，
+//     访问控制为 HUB_ALLOW_IPS 白名单（空 = 全部拒绝，fail-closed）；
+//   - 上游出口用多地址快速失败拨号（Twon→googleapis 坏 IP 防雷，design §5）；
+//   - 磁盘块缓存 + 周期清扫（TTL 48h + LRU 200G）。
+func runServeHub(cfg config.Config, logger *slog.Logger, stderr io.Writer) int {
+	cache, err := proxy.NewDiskCache(proxy.DiskCacheConfig{
+		Dir:         cfg.DiskCacheDir,
+		BudgetBytes: int64(cfg.DiskBudgetGB) << 30,
+		MaxAge:      time.Duration(cfg.CacheMaxAgeMinutes) * time.Minute,
+		Logger:      logger,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "gd-agent serve 启动失败：%v\n", err)
+		return 1
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	// 启动即扫一轮（重建磁盘索引 + 让容量计账立刻准确），随后每 10 分钟一轮。
+	cache.StartSweeper(ctx)
+
+	// enabled 由心跳驱动（master 可在网页禁用节点；hub 被禁用后不再拉新直链，
+	// 已缓存的字节与 warm 存的直链仍继续服务）。
+	var enabled atomic.Bool
+	enabled.Store(true)
+
+	links := proxy.NewLinkSource(proxy.LinkSourceConfig{
+		MasterURL: cfg.MasterURL,
+		AgentID:   cfg.AgentID,
+		Secret:    cfg.AgentSecret,
+		Logger:    logger,
+		Enabled:   enabled.Load,
+	})
+	hub := proxy.NewHub(proxy.HubConfig{
+		AllowIPs:              cfg.HubAllowIPs,
+		Cache:                 cache,
+		Links:                 links,
+		Logger:                logger,
+		MaxConcurrent:         cfg.MaxConcurrent,
+		WarmHeadBytes:         cfg.WarmHeadBytes,
+		WarmTailBytes:         cfg.WarmTailBytes,
+		WarmResumeWindowBytes: cfg.WarmResumeWindowBytes,
+	})
+	beat := heartbeat.New(heartbeat.Options{
+		MasterURL:     cfg.MasterURL,
+		AgentID:       cfg.AgentID,
+		Secret:        cfg.AgentSecret,
+		Version:       version,
+		ListenPort:    cfg.HubPort,
+		PublicBaseURL: cfg.PublicBaseURL,
+		ActiveStreams: hub.ActiveStreams,
+		Logger:        logger,
+	})
+
+	server := &http.Server{
+		Addr:    fmt.Sprintf(":%d", cfg.HubPort),
+		Handler: hub,
+		// 与 node 同款超时取舍：只防慢速请求头；响应体是文件流，WriteTimeout 必须为 0。
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       0,
+		WriteTimeout:      0,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	go beat.Run(ctx, &enabled)
+
+	errCh := make(chan error, 1)
+	go func() {
+		logger.Info("gd-agent 启动（hub）",
+			"version", version,
+			"hub_port", cfg.HubPort,
+			"master_url", cfg.MasterURL,
+			"max_concurrent", cfg.MaxConcurrent,
+			"disk_cache_dir", cfg.DiskCacheDir,
+			"disk_budget_gb", cfg.DiskBudgetGB,
+			"cache_max_age_minutes", cfg.CacheMaxAgeMinutes,
+			"warm_head_bytes", cfg.WarmHeadBytes,
+			"warm_tail_bytes", cfg.WarmTailBytes,
+			"allow_ips", cfg.HubAllowIPs,
 		)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err

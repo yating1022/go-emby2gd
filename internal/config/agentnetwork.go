@@ -30,6 +30,14 @@ const (
 	defaultAgentOfflineSeconds = 45
 	// defaultAgentURLTTL 客户端 URL 签名时效默认值
 	defaultAgentURLTTL = time.Hour * 24
+	// defaultAgentHubPort hub 内网口默认端口
+	//
+	// 与 hub 侧配置(HUB_PORT)的默认值一致; 数据面 /f 与控制面 /warm 共用该端口。
+	defaultAgentHubPort = 8791
+	// defaultAgentHubWarmTimeout 预热指令默认超时
+	//
+	// 只影响 hub 路径: 超时即回退现状(浏览回退"戳边缘", 播放回退 Google 直链)。
+	defaultAgentHubWarmTimeout = time.Second * 3
 )
 
 // agent 节点调度策略取值(schedule-strategy 的合法值)
@@ -83,6 +91,16 @@ type AgentNetwork struct {
 	// 用指针区分"未配置"(nil, 取默认值 true)与"显式 false";
 	// 关闭后行为与未部署本功能完全一致。
 	PreheatEnable *bool `yaml:"preheat-enable"`
+	// HubEnable 是否接入 hub 缓存中心(agent-network.hub-enable), 默认关
+	//
+	// 开启后(且 agent 网络本身启用):
+	//   - 浏览预热的目标从"戳边缘节点"改为向 hub 下发 /warm 指令,
+	//     指令失败或没有健康 hub 时回退原有"戳边缘"路径;
+	//   - 节点的上游在 warm 被接受后指向 hub 的内网口, 字节改由 hub 回源;
+	//   - role=hub 的节点永不参与客户端调度(与开关无关, 恒成立)。
+	//
+	// 关闭时所有路径与未部署 hub 完全一致。
+	HubEnable bool `yaml:"hub-enable"`
 
 	// scheduleStrategy 节点调度策略(agent-network.schedule-strategy)
 	//
@@ -93,6 +111,14 @@ type AgentNetwork struct {
 	fallbackToLocalSet bool
 	// urlTTL 初始化后的客户端 URL 签名时效
 	urlTTL time.Duration
+	// hubPort hub 内网口端口(agent-network.hub-port)
+	//
+	// 非导出: 外部只通过 HubPort() 读取, 缺省与校验在 Init 里完成。
+	hubPort int
+	// hubWarmTimeoutRaw 配置里原始的预热指令超时文本(如 "3s")
+	hubWarmTimeoutRaw string
+	// hubWarmTimeout 初始化后的预热指令超时
+	hubWarmTimeout time.Duration
 }
 
 // UnmarshalYAML 自定义解析 agent 网络配置
@@ -111,6 +137,9 @@ func (a *AgentNetwork) UnmarshalYAML(value *yaml.Node) error {
 		FallbackToLocal  *bool  `yaml:"fallback-to-local"`
 		PreheatEnable    *bool  `yaml:"preheat-enable"`
 		ScheduleStrategy string `yaml:"schedule-strategy"`
+		HubEnable        bool   `yaml:"hub-enable"`
+		HubPort          int    `yaml:"hub-port"`
+		HubWarmTimeout   string `yaml:"hub-warm-timeout"`
 	}
 
 	var v plainAgentNetwork
@@ -124,6 +153,9 @@ func (a *AgentNetwork) UnmarshalYAML(value *yaml.Node) error {
 	a.URLTTL = v.URLTTL
 	a.PreheatEnable = v.PreheatEnable
 	a.scheduleStrategy = v.ScheduleStrategy
+	a.HubEnable = v.HubEnable
+	a.hubPort = v.HubPort
+	a.hubWarmTimeoutRaw = v.HubWarmTimeout
 	if v.FallbackToLocal != nil {
 		a.FallbackToLocal = *v.FallbackToLocal
 		a.fallbackToLocalSet = true
@@ -136,6 +168,7 @@ func (a *AgentNetwork) Init() error {
 	// 0 统一去除首尾空白, 避免从 yaml 复制粘贴时带入不可见字符
 	a.EnrollToken = strings.TrimSpace(a.EnrollToken)
 	a.URLTTL = strings.TrimSpace(a.URLTTL)
+	a.hubWarmTimeoutRaw = strings.TrimSpace(a.hubWarmTimeoutRaw)
 
 	// 1 注册 Token 的环境变量覆盖
 	//
@@ -183,7 +216,27 @@ func (a *AgentNetwork) Init() error {
 			a.scheduleStrategy, maps.Keys(validAgentScheduleStrategy))
 	}
 
-	// 6 未启用时不再校验凭据, 行为与未部署本功能完全一致
+	// 6 hub 缓存中心接入项: 与 enable / hub-enable 无关地提前校验
+	//
+	// 理由同上面两项: 配错但还没打开的开关也应该在启动阶段暴露,
+	// 而不是等接入 hub 后才发现端口/超时是错的。
+	if a.hubPort == 0 {
+		a.hubPort = defaultAgentHubPort
+	}
+	if a.hubPort < 1 || a.hubPort > 65535 {
+		return fmt.Errorf("agent-network.hub-port 配置错误: %d, 有效范围: [1, 65535]", a.hubPort)
+	}
+	if a.hubWarmTimeoutRaw == "" {
+		a.hubWarmTimeout = defaultAgentHubWarmTimeout
+	} else {
+		timeout, err := parseDuration(a.hubWarmTimeoutRaw)
+		if err != nil {
+			return fmt.Errorf("agent-network.hub-warm-timeout 配置错误: %w", err)
+		}
+		a.hubWarmTimeout = timeout
+	}
+
+	// 7 未启用时不再校验凭据, 行为与未部署本功能完全一致
 	//
 	// 校验错误消息里只提字段名, 绝不回显凭据值。
 	if !a.Enable {
@@ -247,4 +300,33 @@ func (a *AgentNetwork) PreheatEnabled() bool {
 		return true
 	}
 	return *a.PreheatEnable
+}
+
+// HubEnabled 获取是否接入 hub 缓存中心(默认关闭)
+func (a *AgentNetwork) HubEnabled() bool {
+	if a == nil {
+		return false
+	}
+	return a.HubEnable
+}
+
+// HubPort 获取 hub 内网口的端口
+//
+// 配置对象为空或未初始化时按默认值处理(8791, 与 hub 侧一致)。
+func (a *AgentNetwork) HubPort() int {
+	if a == nil || a.hubPort <= 0 {
+		return defaultAgentHubPort
+	}
+	return a.hubPort
+}
+
+// HubWarmTimeout 获取预热指令的超时
+//
+// 配置对象为空或未初始化时按默认值处理(3s): 超时即回退现状,
+// 不会把 hub 的故障放大成播放/浏览的等待。
+func (a *AgentNetwork) HubWarmTimeout() time.Duration {
+	if a == nil || a.hubWarmTimeout <= 0 {
+		return defaultAgentHubWarmTimeout
+	}
+	return a.hubWarmTimeout
 }

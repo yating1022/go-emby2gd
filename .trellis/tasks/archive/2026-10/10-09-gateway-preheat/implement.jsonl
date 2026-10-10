@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/agent-network.md", "reason": "调度/签名/注册表与状态文件契约——预热复用 PickAndSign，不得改协议；静默降级语义"}
+{"file": ".trellis/spec/backend/gdrive-panel.md", "reason": "MatchMountPath/逻辑路径与面板 token 余量——预热解析沿同一条口"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "内存状态模式：去重 map 的 TTL/有界/裁剪写法对齐既有约定"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "测试与验收口径（禁 commit、对照式验收）"}

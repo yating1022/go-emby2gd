@@ -26,6 +26,9 @@ type Options struct {
 	MasterURL     string
 	Token         string // 注册 Token（本项目：网关配置段 agent-network.enroll-token，见任务 10-08-agent-proxy-network design §2.6）
 	PublicBaseURL string // 可空：NAT 后的机器必须显式给（冻结稿 §4.2）
+	// Role 是运行角色："node"（缺省/空）或 "hub"（hub 缓存中心）。
+	// node 角色的请求与 v0.3.2 逐字节一致（不携带 role 字段）。
+	Role          string
 	ListenPort    int
 	ConfigPath    string // 空则 config.DefaultPath
 	Version       string // 二进制版本（构建时注入）
@@ -46,6 +49,9 @@ type request struct {
 	Version       string  `json:"version"`
 	ListenPort    int     `json:"listen_port"`
 	PublicBaseURL *string `json:"public_base_url"`
+	// Role 只在 hub 角色时携带（omitempty）：master 侧"缺省 = node"，
+	// node 的 enroll 请求因此与 v0.3.2 逐字节一致。
+	Role string `json:"role,omitempty"`
 }
 
 type response struct {
@@ -63,8 +69,21 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	if opts.Token == "" {
 		return Result{}, fmt.Errorf("缺少注册 Token（--token）：请在 master 网页「节点」页复制安装命令")
 	}
+	role := config.NormalizeRole(opts.Role)
+	if !config.ValidRole(role) {
+		return Result{}, fmt.Errorf("--role 取值不合法：%q（合法值：node、hub）", opts.Role)
+	}
+	if role == "" {
+		role = config.RoleNode
+	}
+	// 端口缺省按角色取：node 数据面 8790、hub 内网口 8791（与 master 的
+	// agent-network.hub-port 默认值一致）。显式 --port 一律优先。
 	if opts.ListenPort == 0 {
-		opts.ListenPort = config.DefaultListenPort
+		if role == config.RoleHub {
+			opts.ListenPort = config.DefaultHubPort
+		} else {
+			opts.ListenPort = config.DefaultListenPort
+		}
 	}
 	if opts.ConfigPath == "" {
 		opts.ConfigPath = config.DefaultPath
@@ -99,6 +118,9 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		ListenPort:    opts.ListenPort,
 		PublicBaseURL: publicBaseURL,
 	}
+	if role == config.RoleHub {
+		payload.Role = config.RoleHub
+	}
 	var apiErr *api.Error
 	if err := client.PostJSON(ctx, "/api/agent/enroll", payload, &resp); err != nil {
 		if errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
@@ -125,11 +147,33 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		PrefetchHeadMB:     config.DefaultPrefetchHeadMB,
 		PrefetchTailMB:     config.DefaultPrefetchTailMB,
 	}
+	if role == config.RoleHub {
+		// hub：写 ROLE 与 hub 专属键（config.marshal 只在 IsHub 时输出）。
+		// 端口复用 --port：hub 的监听口即 HUB_PORT，写进配置后 serve 按它监听；
+		// LISTEN_PORT 同值，避免配置文件里出现两个互不相干的端口。
+		cfg.Role = config.RoleHub
+		cfg.HubPort = opts.ListenPort
+		cfg.CacheMaxAgeMinutes = config.DefaultHubCacheMaxAgeMinutes
+		cfg.DiskCacheDir = config.DefaultDiskCacheDir
+		cfg.DiskBudgetGB = config.DefaultDiskBudgetGB
+		cfg.WarmHeadBytes = config.DefaultWarmHeadBytes
+		cfg.WarmTailBytes = config.DefaultWarmTailBytes
+		cfg.WarmResumeWindowBytes = config.DefaultWarmResumeWindowBytes
+		// HUB_ALLOW_IPS 刻意留空：8791 是公网暴露面，白名单是唯一访问控制，
+		// 空 = 全部拒绝（fail-closed）。管理员必须显式填 master 与各节点的 IP。
+	}
 	if err := config.Write(opts.ConfigPath, cfg); err != nil {
 		return Result{}, err
 	}
-	logger.Info("注册成功，配置已写入",
-		"agent_id", cfg.AgentID, "config", opts.ConfigPath, "listen_port", cfg.ListenPort)
+	if role == config.RoleHub {
+		logger.Info("注册成功，配置已写入",
+			"agent_id", cfg.AgentID, "config", opts.ConfigPath, "listen_port", cfg.ListenPort,
+			"role", config.RoleHub)
+	} else {
+		// node：日志与 v0.3.2 逐字一致（不凭空多一个 role 字段）。
+		logger.Info("注册成功，配置已写入",
+			"agent_id", cfg.AgentID, "config", opts.ConfigPath, "listen_port", cfg.ListenPort)
+	}
 	return Result{Config: cfg}, nil
 }
 

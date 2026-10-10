@@ -14,6 +14,23 @@ const (
 	copyBufferSize = 32 * 1024
 )
 
+// upstreamTransport 是 node/hub 共用的连接池参数（改一处即两处生效）；
+// 唯一差异是 DialContext：node 用标准 dialer，hub 换多地址快速失败拨号
+// （见 multidial.go 的 NewHubUpstreamClient）。
+func upstreamTransport(dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Transport {
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dial,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          64,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+}
+
 // NewUpstreamClient 构造访问 Google 的 HTTP 客户端。
 //
 // 关键取舍（不要改回去）：
@@ -23,19 +40,12 @@ const (
 //     跳转（目标 URL 自带签名参数）；手动把 Authorization 加回反而会把 Google
 //     凭据泄漏给重定向目标（冻结稿 §9-4）。本部署链路实测无重定向
 //     （网关侧 spec gdrive-panel.md §3.3），此项仅作惰性防线。
+//   - **DialContext 保持标准 dialer**（v0.3.2 冻结行为）：多地址快速失败只给
+//     hub 用（NewHubUpstreamClient）。
 func NewUpstreamClient() *http.Client {
-	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          64,
-		MaxIdleConnsPerHost:   8,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
+	return &http.Client{
+		Transport: upstreamTransport((&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext),
 	}
-	return &http.Client{Transport: transport}
 }
 
 // passthroughHeaderNames 是透传给客户端的响应头白名单（冻结稿 §2.4）。

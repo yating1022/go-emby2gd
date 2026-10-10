@@ -288,6 +288,63 @@ Frozen v0.3.2 contracts:
   for {未送达, 错误响应码} (「预热请求发送失败」/「预热请求失败」); sent-but-timeout is INFO
   「已触发（响应超时，节点侧预取不受影响）」. Signed URLs stay redacted in every branch.
 
+### 3.12 Cache hub (role=hub) — v0.4.0
+
+One binary, two roles: `ROLE=node` (default, byte-identical behavior) | `ROLE=hub`. A hub is a
+registered agent (enroll carries `role=hub`, omitempty — node enrolls exactly as before) that is
+**never a client-serving candidate** (scheduler filters it first) and must never receive client
+traffic. Nodes keep relaying whatever upstream URL the master puts in the link payload, so the hub
+is invisible to them.
+
+**Registry / selection.** `role` is persisted only for hubs (a node entry stays byte-identical to
+the pre-role format); an old `agents.json` without `role` reads as node; enroll validates
+`role∈{node,hub}` (default node, invalid → 400); re-enroll refreshes role (node does not send it).
+`hubFor(fileID)`: healthy hubs sorted by **(priority ascending — smaller = higher, project-wide
+semantics — then id ascending)**, pick `fnv64a(fileID) % len(hubs)`; no healthy hub → nil → current
+behavior. Deterministic per input and restart-stable; multi-hub reserved (one cache copy per file).
+
+**Control plane** (master → hub; shares the app-level `HUB_ALLOW_IPS` fail-closed allowlist with
+the data plane): `POST /warm` payload
+`{file_id, file_token, direct_link, auth, regions{head_bytes, tail_bytes, resume_offset_bytes}}`.
+`file_token` = the download-link channel's file_id form (base64 gdPath) — the ONLY credential path
+the hub has to refresh the ~1h direct link (hub holds no Drive account of its own);
+`resume_offset_bytes` optional (master currently never sends — it cannot compute one);
+unknown fields must be tolerated; `regions` 0/absent → config defaults (128MiB head / 4MiB tail).
+**200 = accepted** (master marks the accept; duplicate warm = 200 + adopt the new link);
+`POST /cancel` is sticky. `409 not_warmed` is returned by `/f/` when no link is held for the file.
+
+**Warm execution.** Head = one stream `bytes=0-(head-1)` sliced on arrival; tail and resume
+regions as aligned windows; the block-alignment gate (`gotStart%blockSize != 0` → drop the stream)
+sits before Observe; 3-minute rule: no client activity after warm → stop at head; actual playback
+(any `/f/` stream in flight) → cancel timer + background full fill, yielding to active streams —
+the watchdog must be paused during yield waits (long playback would otherwise trip the stall
+timeout mid-fill).
+
+**Data plane** `/f/<fileID>` (plaintext, allowlist-only): three-state — full hit serves from disk
+with **zero egress** (no link needed), partial → prefix-first mixed, miss → upstream tee, each
+filled 4MiB block Put synchronously while streaming. Node → hub carries **no** Authorization
+(link payload for hub carries `headers:{}`); hub → Google carries the warm credential. HEAD passes
+through uncached.
+
+**Disk cache** (`DISK_CACHE_DIR`, on the big disk): `<dir>/<hash[:2]>/<hash>/{meta.json,<idx>.blk}`,
+temp+rename, identity chain per §3.11, lazy 48h TTL (`CACHE_MAX_AGE_MINUTES=2880`) + 10-min sweep,
+LRU `DISK_BUDGET_GB` (enforced at fill-end/sweep — bounded transient overshoot), atime throttle,
+restart recovery, Pin/Shard locks. **No cross-process locking — exactly one hub instance per
+DISK_CACHE_DIR** (systemd single instance).
+
+**Outbound hardening.** Multi-address fast-fail dial: 1.5s per address, last address 4× grace
+(measured Twon→googleapis stalls 7.5–22.5s without it); 401/403 → re-link via download-link keyed
+by `file_token`, then resume.
+
+**Master-side play/serve rewrite.** Warm accepted → node upstream becomes
+`http://<hub>:<hub-port>/f/<fileID>` with no auth; otherwise Google direct. `role=hub`
+download-link requests are **never rewritten** (self-loop guard — hub must be able to fetch a real
+link for itself). `agent-network.hub-port` (8791) must equal the hub's `HUB_PORT`. Config:
+`hub-enable` (default false, off ⇒ byte-identical to before), `hub-warm-timeout` (3s), 30s failure
+cool-down, accept-marker TTL **30min** (< the ~1h link, so re-warm self-heals), zero network cost
+when no healthy hub exists. Log hygiene: warm payloads carry the panel credential — no secret,
+key or signed URL may ever reach logs on either side.
+
 ## 4. Validation & Error Matrix
 
 | Situation | Status | Code / behavior |
@@ -346,6 +403,17 @@ Frozen v0.3.2 contracts:
   yield timeline (no new bytes land while a client is active), resume request-count exactness,
   misaligned-start drop, 401-refresh-once on the prefetch path. Mutation-verified: removing any of
   the 8 covered behaviors turns its test red.
+- hub (v0.4.0) — registry: old file without role reads node, node round-trip byte-identical,
+  enroll role validation; scheduler: hub never a candidate (both strategies); `hubFor`
+  determinism (independent recompute + restart stability); `/warm`: payload shape incl.
+  `file_token`, unknown-field tolerance, 200-only accept, cooldown, bounded accept store; play
+  rewrite + fallback chain; **role=hub download-link self-loop guard (mutation-verified)**;
+  hub: whitelist fail-closed (mutation), three-state byte matrix, 409, region shapes, 3-minute
+  rule + playback continuation, watchdog-paused-during-yield, misaligned-region drop,
+  region-path 401 re-link + resume, disk cache TTL/LRU/crash-reuse/Pin, multi-dial bad-address
+  skip + last-address grace, credential hygiene both directions. `hub-enable=false` ⇒
+  byte-identical to baseline with a **connected** fake hub (a dead port proves nothing —
+  mutation-verified).
 
 ## 7. Wrong vs Correct
 
@@ -412,4 +480,30 @@ never reach logs (logging-guidelines.md).
 ```go
 // single `Range: bytes=0-(head-1)`, Put each filled 4 MiB block immediately;
 // block 0 ready in seconds (smoke: 527 ms incl. one yield poll), full head+tail = 2 requests
+```
+
+#### Wrong — client scheduler may pick the hub
+
+```go
+candidates := allAgents() // hub included: clients get 302'd to an origin cache (210ms from
+                          // home, no /dl/ handler) — playback breaks
+```
+
+#### Correct — hub filtered before any strategy
+
+```go
+for _, rec := range all { if rec.Role == RoleHub { continue } } // first line of candidate build
+```
+
+#### Wrong — rewriting the hub's own download-link request
+
+```go
+// role=hub asks master for a Google link; rewrite hands it http://<hub-itself>/f/... —
+// the hub re-links forever against itself and playback stalls on a dead loop
+```
+
+#### Correct — exempt role=hub from the rewrite
+
+```go
+if rec.Role != RoleHub { u = hubUpstreamFor(...) } // hub keeps getting real Google links
 ```

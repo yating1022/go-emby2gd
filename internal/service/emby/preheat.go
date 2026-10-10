@@ -223,14 +223,29 @@ func firePreheat(itemInfo ItemInfo) {
 		return
 	}
 
-	// 3 选点并签发地址(与播放入口同一条调度路径; 日志只含节点与文件, 不含签名)
+	// 3 hub 缓存中心: 接入后预热目标从"戳边缘"改为"下指令给 hub"
+	//
+	// hub 接受即完成 —— 头段/尾段由 hub 直接从 Google 取并落盘, 不再打扰节点;
+	// 没有健康 hub 时静默回退(accepted=false, err=nil),
+	// 指令失败(超时/非 200/取直链失败)记 WARN 后同样回退到下面的边缘预热。
+	if agentnet.HubRoutingEnabled() {
+		accepted, err := agentnet.WarmFile(context.Background(), gdPath)
+		if accepted {
+			return
+		}
+		if err != nil {
+			logs.Warn("[网关预热] hub 预热失败, 回退节点预热: %v, 文件: %s", err, gdPath)
+		}
+	}
+
+	// 4 选点并签发地址(与播放入口同一条调度路径; 日志只含节点与文件, 不含签名)
 	signedURL, err := agentnet.PickAndSign(gdPath)
 	if err != nil {
 		logs.Warn("[网关预热] 无可用节点或签发失败, 跳过: %v, 文件: %s", err, gdPath)
 		return
 	}
 
-	// 4 小 Range 打一枪, 触发节点侧读前缓存的首触预取
+	// 5 小 Range 打一枪, 触发节点侧读前缓存的首触预取
 	outcome, err := preheatRequest(signedURL)
 	logPreheatOutcome(outcome, err, gdPath)
 }
